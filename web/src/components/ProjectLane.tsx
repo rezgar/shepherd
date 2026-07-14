@@ -8,11 +8,13 @@ export function ProjectLane({
   agents,
   now,
   color,
+  onSelect,
 }: {
   product: string;
   agents: AgentModel[];
   now: number;
   color: string;
+  onSelect: (a: AgentModel) => void;
 }) {
   const needs = agents.filter((a) => a.state === 'needs-you').length;
   const sorted = [...agents].sort(
@@ -28,7 +30,7 @@ export function ProjectLane({
       </div>
       <div className="lane__body" style={{ borderColor: color + '55' }}>
         {sorted.map((a) => (
-          <AgentCard key={a.sessionId} agent={a} now={now} />
+          <AgentCard key={a.sessionId} agent={a} now={now} onClick={() => onSelect(a)} />
         ))}
       </div>
     </div>

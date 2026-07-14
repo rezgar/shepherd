@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
-import { useSnapshot, useTick } from './api';
+import { useShepherd, useTick } from './api';
 import { ProjectLane } from './components/ProjectLane';
+import { FocusView } from './components/FocusView';
 import type { AgentModel } from './types';
 
 const PALETTE = ['#58a6ff', '#bc8cff', '#39c5cf', '#e3b341', '#f0883e', '#56d364', '#ff7b72', '#79c0ff'];
@@ -13,7 +14,6 @@ function groupByProduct(agents: AgentModel[]): [string, AgentModel[]][] {
     arr.push(a);
     map.set(a.product, arr);
   }
-  // Products with someone waiting on you float first, then by most-recent activity.
   return [...map.entries()].sort((a, b) => {
     const an = a[1].some((x) => x.state === 'needs-you') ? 0 : 1;
     const bn = b[1].some((x) => x.state === 'needs-you') ? 0 : 1;
@@ -25,18 +25,18 @@ function groupByProduct(agents: AgentModel[]): [string, AgentModel[]][] {
 }
 
 export function App() {
-  const { snap, connected } = useSnapshot();
+  const { snap, transcript, connected, focus, unfocus } = useShepherd();
   const now = useTick(1000);
   const [windowH, setWindowH] = useState(4);
+  const [focusedId, setFocusedId] = useState<string | null>(null);
 
-  // Stable, distinct color per product (assigned by sorted order, not a hash,
-  // so lanes never collide until we exceed the palette).
   const colorMap = useMemo(() => {
     const names = snap ? [...new Set(snap.agents.map((a) => a.product))].sort() : [];
     const m = new Map<string, string>();
     names.forEach((n, i) => m.set(n, PALETTE[i % PALETTE.length]));
     return m;
   }, [snap]);
+  const colorOf = (product: string) => colorMap.get(product) ?? '#58a6ff';
 
   if (!snap) {
     return (
@@ -46,11 +46,34 @@ export function App() {
     );
   }
 
-  // "Active" = within the window of the MOST RECENT activity, not wall-clock now —
-  // so stepping away for a while still shows the cluster you were working on.
   const latest = snap.agents.reduce((mx, a) => Math.max(mx, a.lastActivity), 0);
   const cutoff = latest - windowH * 3_600_000;
   const visible = snap.agents.filter((a) => a.lastActivity >= cutoff);
+
+  const openAgent = (a: AgentModel) => {
+    setFocusedId(a.sessionId);
+    focus(a.file, a.sessionId);
+  };
+  const closeFocus = () => {
+    setFocusedId(null);
+    unfocus();
+  };
+
+  const focused = focusedId ? (snap.agents.find((a) => a.sessionId === focusedId) ?? null) : null;
+
+  if (focused) {
+    return (
+      <FocusView
+        agents={visible}
+        focused={focused}
+        transcript={transcript && transcript.sessionId === focused.sessionId ? transcript : null}
+        now={now}
+        colorOf={colorOf}
+        onSelect={openAgent}
+        onExit={closeFocus}
+      />
+    );
+  }
 
   const needsYou = visible.filter((a) => a.state === 'needs-you').length;
   const working = visible.filter((a) => a.state === 'working').length;
@@ -89,7 +112,8 @@ export function App() {
             product={product}
             agents={agents}
             now={now}
-            color={colorMap.get(product) ?? '#58a6ff'}
+            color={colorOf(product)}
+            onSelect={openAgent}
           />
         ))}
       </main>

@@ -7,13 +7,36 @@ const STATE_DOT: Record<AgentModel['state'], string> = {
   idle: '#8b949e',
 };
 
-export function AgentCard({ agent, now }: { agent: AgentModel; now: number }) {
+export function AgentCard({
+  agent,
+  now,
+  compact,
+  selected,
+  onClick,
+}: {
+  agent: AgentModel;
+  now: number;
+  compact?: boolean;
+  selected?: boolean;
+  onClick?: () => void;
+}) {
   const needs = agent.state === 'needs-you';
   const cur = stageIndex(agent.stage);
   const ago = humAgo(now - agent.lastActivity);
 
+  const cls = [
+    'card',
+    needs && 'card--needs',
+    agent.state === 'idle' && 'card--idle',
+    compact && 'card--compact',
+    selected && 'card--selected',
+    onClick && 'card--clickable',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
   return (
-    <div className={`card${needs ? ' card--needs' : ''}${agent.state === 'idle' ? ' card--idle' : ''}`}>
+    <div className={cls} onClick={onClick}>
       {needs && <span className="badge">!</span>}
 
       <div className="card__top">
@@ -25,23 +48,24 @@ export function AgentCard({ agent, now }: { agent: AgentModel; now: number }) {
       {/* progress bar above the title */}
       <div className="pips" aria-label={`stage ${agent.stage}`} title={`stage: ${agent.stage}`}>
         {STAGES.map((_, i) => {
-          const cls = cur < 0 ? '' : i < cur ? 'g' : i === cur ? (needs ? 'a' : 'g') : '';
-          return <i key={i} className={cls} />;
+          const c = cur < 0 ? '' : i < cur ? 'g' : i === cur ? (needs ? 'a' : 'g') : '';
+          return <i key={i} className={c} />;
         })}
       </div>
-      <div className="pips__labels">
-        {STAGE_LABELS.map((l, i) => (
-          <span key={l} className={i === cur ? 'on' : ''}>
-            {l}
-          </span>
-        ))}
-      </div>
+      {!compact && (
+        <div className="pips__labels">
+          {STAGE_LABELS.map((l, i) => (
+            <span key={l} className={i === cur ? 'on' : ''}>
+              {l}
+            </span>
+          ))}
+        </div>
+      )}
 
       <div className="card__name" title={`${agent.name}\n${agent.label} · ${agent.cwd}`}>
         {agent.name}
       </div>
 
-      {/* action tag sits directly above the question/ask text */}
       {needs && (
         <div className="card__kind">{agent.action === 'approve' ? '⏸ APPROVE' : '❔ QUESTION'}</div>
       )}
