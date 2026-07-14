@@ -201,6 +201,11 @@ export async function parseSession(file: string, now: number): Promise<AgentMode
     state = 'needs-you';
     action = 'question';
     status = gist(lastAssistantText, 200);
+  } else if (wantsTool && autoRuns && idleMs < STALE_MS) {
+    // executing a tool (including a subagent) in an auto-approving mode — the
+    // session is still running even if it hasn't written for a while.
+    state = 'working';
+    status = workingStatus(lastToolName, lastToolInput, lastAssistantText);
   } else if (activelyRunning && lastEventKind !== 'user') {
     state = 'working';
     status = workingStatus(lastToolName, lastToolInput, lastAssistantText);

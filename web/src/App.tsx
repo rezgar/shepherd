@@ -23,13 +23,10 @@ function groupByProduct(agents: AgentModel[]): [string, AgentModel[]][] {
     arr.push(a);
     map.set(a.product, arr);
   }
-  // Products with someone waiting on you float first, then stable by earliest creation.
-  return [...map.entries()].sort((a, b) => {
-    const an = a[1].some((x) => x.state === 'needs-you') ? 0 : 1;
-    const bn = b[1].some((x) => x.state === 'needs-you') ? 0 : 1;
-    if (an !== bn) return an - bn;
-    return Math.min(...a[1].map((x) => x.createdAt)) - Math.min(...b[1].map((x) => x.createdAt));
-  });
+  // Stable order by each product's earliest session creation — never reorder on activity.
+  return [...map.entries()].sort(
+    (a, b) => Math.min(...a[1].map((x) => x.createdAt)) - Math.min(...b[1].map((x) => x.createdAt)),
+  );
 }
 
 export function App() {

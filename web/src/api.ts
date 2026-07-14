@@ -4,6 +4,7 @@ import type { ChatMsg, Snapshot } from './types';
 const WS_URL = 'ws://localhost:4177';
 
 interface Loaded {
+  sessionId: string;
   messages: ChatMsg[];
   offset: number; // index of the first loaded message in the full transcript
   total: number;
@@ -13,7 +14,7 @@ export interface Shepherd {
   snap: Snapshot | null;
   connected: boolean;
   focusedId: string | null;
-  /** null while nothing focused; [] once focused but before first window arrives. */
+  /** null = nothing (or a different session still loading); [] = focused-but-empty. */
   messages: ChatMsg[] | null;
   hasMore: boolean;
   focus: (file: string, sessionId: string) => void;
@@ -21,18 +22,25 @@ export interface Shepherd {
   loadMore: () => void;
 }
 
-function mergeTail(prev: Loaded | null, tail: ChatMsg[], offset: number, total: number): Loaded {
-  if (!prev || !prev.messages.length) return { messages: tail, offset, total };
+function mergeTail(prev: Loaded | null, sessionId: string, tail: ChatMsg[], offset: number, total: number): Loaded {
+  if (!prev || prev.sessionId !== sessionId || !prev.messages.length) {
+    return { sessionId, messages: tail, offset, total };
+  }
   // A tail window overlaps what we have — append only genuinely new messages.
   const have = new Set(prev.messages.map((m) => m.id));
   const added = tail.filter((m) => !have.has(m.id));
-  return { messages: added.length ? [...prev.messages, ...added] : prev.messages, offset: prev.offset, total };
+  return {
+    sessionId,
+    messages: added.length ? [...prev.messages, ...added] : prev.messages,
+    offset: prev.offset,
+    total,
+  };
 }
 
 function prependOlder(prev: Loaded, older: ChatMsg[], offset: number): Loaded {
   const have = new Set(prev.messages.map((m) => m.id));
   const fresh = older.filter((m) => !have.has(m.id));
-  return { messages: [...fresh, ...prev.messages], offset, total: prev.total };
+  return { sessionId: prev.sessionId, messages: [...fresh, ...prev.messages], offset, total: prev.total };
 }
 
 export function useShepherd(): Shepherd {
@@ -71,14 +79,14 @@ export function useShepherd(): Shepherd {
         } else if (d.type === 'transcript') {
           if (d.sessionId !== focusRef.current?.sessionId) return;
           setLoaded((prev) => {
-            const next = mergeTail(prev, d.messages, d.offset, d.total);
+            const next = mergeTail(prev, d.sessionId, d.messages, d.offset, d.total);
             cache.current.set(d.sessionId, next);
             return next;
           });
         } else if (d.type === 'transcriptMore') {
           if (d.sessionId !== focusRef.current?.sessionId) return;
           setLoaded((prev) => {
-            if (!prev) return prev;
+            if (!prev || prev.sessionId !== d.sessionId) return prev;
             const next = prependOlder(prev, d.messages, d.offset);
             cache.current.set(d.sessionId, next);
             return next;
@@ -103,7 +111,7 @@ export function useShepherd(): Shepherd {
   const focus = useCallback((file: string, sessionId: string) => {
     focusRef.current = { file, sessionId };
     setFocusedId(sessionId);
-    setLoaded(cache.current.get(sessionId) ?? null); // instant paint from cache
+    setLoaded(cache.current.get(sessionId) ?? null); // instant paint from cache, else clears
     wsRef.current?.send(JSON.stringify({ type: 'focus', file, sessionId }));
   }, []);
 
@@ -117,16 +125,19 @@ export function useShepherd(): Shepherd {
   const loadMore = useCallback(() => {
     const f = focusRef.current;
     const st = loadedRef.current;
-    if (!f || !st || st.offset <= 0) return;
+    if (!f || !st || st.sessionId !== f.sessionId || st.offset <= 0) return;
     wsRef.current?.send(JSON.stringify({ type: 'loadMore', file: f.file, sessionId: f.sessionId, before: st.offset }));
   }, []);
 
+  // Only ever surface the transcript that matches the focused session — a previous
+  // session's content must never linger while switching.
+  const matches = !!loaded && loaded.sessionId === focusedId;
   return {
     snap,
     connected,
     focusedId,
-    messages: loaded ? loaded.messages : focusedId ? [] : null,
-    hasMore: loaded ? loaded.offset > 0 : false,
+    messages: matches ? loaded!.messages : null,
+    hasMore: matches ? loaded!.offset > 0 : false,
     focus,
     unfocus,
     loadMore,

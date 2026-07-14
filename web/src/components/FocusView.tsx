@@ -107,7 +107,7 @@ export function FocusView({
         nameOf={nameOf}
       />
 
-      <ChatTranscript messages={messages} hasMore={hasMore} onLoadMore={onLoadMore} />
+      <ChatTranscript key={focused.sessionId} messages={messages} hasMore={hasMore} onLoadMore={onLoadMore} />
 
       <Composer lastUserMessage={lastUser} />
     </div>

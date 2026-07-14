@@ -426,6 +426,12 @@ body {
   letter-spacing: 0.4px;
   margin-bottom: 5px;
 }
+.msg--user {
+  background: #131c2e;
+  border: 1px solid #21324d;
+  border-radius: 10px;
+  padding: 10px 14px 12px;
+}
 .msg--user .msg__role {
   color: #58a6ff;
 }
