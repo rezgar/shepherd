@@ -527,26 +527,33 @@ body {
   padding: 60px;
   text-align: center;
 }
-.msg {
-  margin-bottom: 20px;
+/* ---- turn (a run of consecutive same-actor messages) ---- */
+.turn {
+  margin-bottom: 18px;
 }
-.msg__role {
+.turn > * + * {
+  margin-top: 8px;
+}
+.turn__role {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.4px;
   margin-bottom: 5px;
 }
-.msg--user {
+.turn--user {
   background: #132039;
   border: 1px solid #2f6feb;
   border-left: 3px solid #58a6ff;
   border-radius: 10px;
   padding: 10px 14px 12px 12px;
 }
-.msg--user .msg__role {
+.turn--user .turn__role {
   color: #79c0ff;
 }
-.msg--pending {
+.turn--assistant .turn__role {
+  color: #8b949e;
+}
+.turn--pending {
   opacity: 0.6;
 }
 .msg__pending-tag {
@@ -557,30 +564,48 @@ body {
   text-transform: none;
   letter-spacing: 0;
 }
-.msg--assistant .msg__role {
-  color: #8b949e;
-}
 .msg__img {
   max-width: min(520px, 100%);
   border-radius: 8px;
   border: 1px solid var(--line);
-  margin: 8px 0;
   display: block;
 }
-.msg__tools {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-}
-.toolchip {
-  font-size: 10.5px;
-  color: #adbac7;
-  background: #161b22;
+
+/* ---- grouped tool calls ---- */
+.toolgroup {
   border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 2px 8px;
-  max-width: 340px;
+  border-radius: 8px;
+  background: #10151d;
+  overflow: hidden;
+}
+.tool-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.tool-row + .tool-row {
+  border-top: 1px solid #1b222c;
+}
+.tool-row__icon {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: center;
+  color: #6e7d90;
+  font-size: 11px;
+}
+.tool-row__name {
+  flex: 0 0 auto;
+  color: #adbac7;
+  font-weight: 600;
+}
+.tool-row__detail {
+  min-width: 0;
+  color: #7d8896;
+  font-family: ui-monospace, 'Cascadia Code', 'Consolas', monospace;
+  font-size: 11.5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
