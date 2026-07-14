@@ -39,6 +39,16 @@ const taskNotification = (taskId: string, status: string, ts: string) => ({
   },
 });
 
+// The notification is written here the instant a subagent finishes, whether
+// or not it's ever also promoted to a "user" turn — some never are (real bug
+// found live: a completed research agent stayed "active" forever because its
+// notification only ever existed as this event, never promoted).
+const queuedNotification = (taskId: string, status: string, ts: string) => ({
+  type: 'queue-operation',
+  timestamp: ts,
+  content: `<task-notification>\n<task-id>${taskId}</task-id>\n<status>${status}</status>\n</task-notification>`,
+});
+
 describe('parseTranscript: active subagents', () => {
   it('reports a dispatched subagent as active once its launch tool_result names it', async () => {
     const f = write('active.jsonl', [
@@ -87,6 +97,16 @@ describe('parseTranscript: active subagents', () => {
   it('ignores an in-flight dispatch with no launch tool_result yet (not active until we can locate its file)', async () => {
     const f = write('pending.jsonl', [dispatch('toolu_5', 'Just dispatched', '2026-07-14T12:00:00.000Z')]);
     const { activeSubagents } = await parseTranscript(f, 'parent5');
+    expect(activeSubagents).toEqual([]);
+  });
+
+  it('drops a subagent whose notification only ever exists as a queue-operation, never promoted to a user turn', async () => {
+    const f = write('queue-only.jsonl', [
+      dispatch('toolu_7', 'Research Claude Code Notification hook payload', '2026-07-14T12:00:00.000Z'),
+      launchResult('toolu_7', 'ae221655f3506887a', '2026-07-14T12:00:00.100Z'),
+      queuedNotification('ae221655f3506887a', 'completed', '2026-07-14T12:05:00.000Z'),
+    ]);
+    const { activeSubagents } = await parseTranscript(f, 'parent7');
     expect(activeSubagents).toEqual([]);
   });
 

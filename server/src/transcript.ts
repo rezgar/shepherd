@@ -128,6 +128,20 @@ export async function parseTranscript(file: string, sessionId: string, limit = 8
     }
     const ts = typeof o.timestamp === 'string' ? Date.parse(o.timestamp) : 0;
 
+    if (o.type === 'queue-operation') {
+      // The <task-notification> is written here the instant a subagent
+      // finishes — it's only *sometimes* also promoted to a real "user" turn
+      // (origin.kind === 'task-notification', handled below) once it's
+      // actually delivered into the conversation. Some notifications sit in
+      // the queue and never get promoted at all (e.g. the session moved on
+      // before it was next read), so this queue-operation record is the one
+      // source that's always there — check it first.
+      const text = typeof o.content === 'string' ? o.content : '';
+      const m = TASK_ID_RE.exec(text);
+      if (m) finishedAgentIds.add(m[1]);
+      continue;
+    }
+
     if (o.type === 'user') {
       if (o.origin?.kind === 'task-notification') {
         const text = typeof o.message?.content === 'string' ? o.message.content : '';

@@ -707,17 +707,19 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid #1c2d4a;
 }
 .subagent-chip {
   display: flex;
   align-items: center;
   gap: 5px;
-  background: #161b22;
-  border: 1px solid #30363d;
+  background: #0d1a2e;
+  border: 1px solid #1f6feb55;
   border-radius: 12px;
   padding: 3px 10px;
   font-size: 12px;
-  color: #a3d9ac;
+  color: #79c0ff;
   cursor: pointer;
   max-width: 320px;
   overflow: hidden;
@@ -725,11 +727,11 @@ body {
   white-space: nowrap;
 }
 .subagent-chip:hover {
-  border-color: #3fb950;
+  border-color: #58a6ff;
   color: #e6edf3;
 }
 .subagent-chip__glyph {
-  color: #3fb950;
+  color: #58a6ff;
   font-weight: 700;
   flex: 0 0 auto;
 }
