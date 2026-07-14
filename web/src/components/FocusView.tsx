@@ -151,7 +151,7 @@ export function FocusView({
 
       {(focused.state === 'working' || activeSubagents.length > 0) && (
         <WorkingIndicator
-          status={focused.state === 'working' ? focused.status : undefined}
+          status={focused.state === 'working' ? focused.activity || focused.status : undefined}
           subagents={activeSubagents}
           onSelectSubagent={(s) => onSelectSubagent(s)}
         />

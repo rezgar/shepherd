@@ -71,6 +71,31 @@ describe('parseSession state classification', () => {
     const m = (await parseSession(f, NOW))!;
     expect(m.state).toBe('idle');
   });
+
+  it('while working, the card status shows the task and activity carries the granular detail', async () => {
+    const f = write('task.jsonl', [
+      { type: 'user', cwd: 'C:/Code/totem/wikifix', gitBranch: 'main', timestamp: ago(20_000), message: { role: 'user', content: 'make the status message use a more general description' } },
+      { type: 'permission-mode', permissionMode: 'bypassPermissions', sessionId: 'x' },
+      { type: 'assistant', cwd: 'C:/Code/totem/wikifix', timestamp: ago(5_000), message: { role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'Edit', input: { file_path: 'parse.ts', description: 'Split status into task + activity' } }] } },
+    ]);
+    const m = (await parseSession(f, NOW))!;
+    expect(m.state).toBe('working');
+    expect(m.status).toBe('make the status message use a more general description');
+    expect(m.activity).toBe('Split status into task + activity');
+  });
+
+  it('a terse follow-up (continue) does not overwrite the task on the card', async () => {
+    const f = write('followup.jsonl', [
+      { type: 'user', cwd: 'C:/Code/totem/wikifix', timestamp: ago(60_000), message: { role: 'user', content: 'refactor the finder pipeline to stream results' } },
+      { type: 'assistant', cwd: 'C:/Code/totem/wikifix', timestamp: ago(50_000), message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Done.' }] } },
+      { type: 'user', cwd: 'C:/Code/totem/wikifix', timestamp: ago(10_000), message: { role: 'user', content: 'continue' } },
+      { type: 'permission-mode', permissionMode: 'bypassPermissions', sessionId: 'x' },
+      { type: 'assistant', cwd: 'C:/Code/totem/wikifix', timestamp: ago(5_000), message: { role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'Bash', input: { command: 'pnpm test', description: 'Run the suite' } }] } },
+    ]);
+    const m = (await parseSession(f, NOW))!;
+    expect(m.state).toBe('working');
+    expect(m.status).toBe('refactor the finder pipeline to stream results');
+  });
 });
 
 describe('hook state overrides the heuristic', () => {

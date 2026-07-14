@@ -22,7 +22,10 @@ export interface AgentModel {
   name: string;
   state: AgentState;
   stage: Stage;
+  /** High-level card status while working (the current task). */
   status: string;
+  /** Granular "doing this instant" detail — focus-view ✽ indicator. */
+  activity: string;
   action: ActionKind | null;
   lastActivity: number;
   createdAt: number;
