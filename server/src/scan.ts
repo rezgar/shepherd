@@ -1,6 +1,6 @@
 import os from 'node:os';
 import path from 'node:path';
-import { readdir } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { parseSession } from './parse.js';
@@ -100,11 +100,28 @@ async function enrich(models: AgentModel[]): Promise<void> {
   );
 }
 
-/** Parse every session into a model, keep the recent ones, resolve names. */
+async function mtimeMs(file: string): Promise<number> {
+  try {
+    return (await stat(file)).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+/** Parse every session into a model, keep the recent ones, resolve names.
+ *
+ *  A user's `~/.claude/projects` accumulates one session file per worktree
+ *  ever created — thousands over time — and fully parsing all of them on
+ *  every rescan (the naive approach) blocks the single-threaded daemon for
+ *  seconds. A file's mtime is exactly its last-write instant, i.e. its last
+ *  activity, so stat-filtering to the recent window first (cheap) lets us
+ *  skip the expensive read+parse for everything outside it. */
 export async function scanAll(now: number): Promise<AgentModel[]> {
   const [files, hooks] = await Promise.all([listSessionFiles(), readHookStates(now)]);
+  const mtimes = await Promise.all(files.map(mtimeMs));
+  const candidates = files.filter((_, i) => now - mtimes[i] <= RECENT_WINDOW_MS);
   const models = await Promise.all(
-    files.map((f) => parseSession(f, now, hooks.get(path.basename(f, '.jsonl'))).catch(() => null)),
+    candidates.map((f) => parseSession(f, now, hooks.get(path.basename(f, '.jsonl'))).catch(() => null)),
   );
   const recent = models.filter(
     (m): m is AgentModel => m !== null && now - m.lastActivity <= RECENT_WINDOW_MS,
