@@ -1,0 +1,11 @@
+{
+  "name": "agent-shepherd",
+  "version": "0.0.1",
+  "private": true,
+  "description": "A spatial cockpit for many parallel Claude Code agents",
+  "scripts": {
+    "dev:server": "pnpm --filter @shepherd/server dev",
+    "dev:web": "pnpm --filter @shepherd/web dev",
+    "test": "pnpm --filter @shepherd/server test"
+  }
+}
