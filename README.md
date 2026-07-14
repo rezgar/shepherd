@@ -36,3 +36,22 @@ pnpm dev:web        # Vite UI on http://localhost:5173
 # sanity check the parser against your real sessions, no server:
 pnpm --filter @shepherd/server start -- --once
 ```
+
+## Exact state via Claude Code hooks (opt-in)
+
+Slice 1/2 infer state heuristically (recency + last-turn shape). For **exact**
+state — a session reads `working` while its subagents run, and `needs-you` the
+instant a permission prompt / notification fires — install the hooks:
+
+```bash
+pnpm setup:hooks
+```
+
+This merges six hooks (`UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
+`Notification`, `Stop`, `SubagentStop`) into `~/.claude/settings.json` — backed
+up to `settings.json.shepherd-backup`, idempotent, existing hooks preserved.
+Each event writes a tiny `~/.claude/shepherd-state/<session>.json` that the
+daemon reads and prefers over the heuristic (falls back to the heuristic when a
+session has no fresh hook state). Re-open your Claude Code sessions to activate.
+To undo, delete the `shepherd-hook.mjs` entries from settings (or restore the
+backup).

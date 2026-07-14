@@ -6,6 +6,7 @@
   "scripts": {
     "dev:server": "pnpm --filter @shepherd/server dev",
     "dev:web": "pnpm --filter @shepherd/web dev",
-    "test": "pnpm --filter @shepherd/server test"
+    "test": "pnpm --filter @shepherd/server test",
+    "setup:hooks": "node server/scripts/install-hooks.mjs"
   }
 }

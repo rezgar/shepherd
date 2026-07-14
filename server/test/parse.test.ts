@@ -72,3 +72,39 @@ describe('parseSession state classification', () => {
     expect(m.state).toBe('idle');
   });
 });
+
+describe('hook state overrides the heuristic', () => {
+  const pending = (name: string) =>
+    write(name, [
+      {
+        type: 'assistant',
+        cwd: 'C:/Code/totem/wikifix',
+        timestamp: ago(5 * 60_000),
+        message: { role: 'assistant', stop_reason: 'tool_use', content: [{ type: 'tool_use', name: 'Task', input: { subagent_type: 'Explore' } }] },
+      },
+    ]);
+
+  it('working hook → working (subagent running) even when the heuristic would say needs-you', async () => {
+    const m = (await parseSession(pending('hookw.jsonl'), NOW, { state: 'working', event: 'SubagentStop', tool: 'Task', ts: NOW }))!;
+    expect(m.state).toBe('working');
+  });
+
+  it('Notification hook → needs-you', async () => {
+    const m = (await parseSession(pending('hookn.jsonl'), NOW, { state: 'needs-you', event: 'Notification', tool: null, ts: NOW }))!;
+    expect(m.state).toBe('needs-you');
+  });
+
+  it('Stop hook with a trailing question still needs you', async () => {
+    const f = write('hookq.jsonl', [
+      {
+        type: 'assistant',
+        cwd: 'C:/Code/totem/wikifix',
+        timestamp: ago(60_000),
+        message: { role: 'assistant', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Which option do you prefer?' }] },
+      },
+    ]);
+    const m = (await parseSession(f, NOW, { state: 'idle', event: 'Stop', tool: null, ts: NOW }))!;
+    expect(m.state).toBe('needs-you');
+    expect(m.action).toBe('question');
+  });
+});
