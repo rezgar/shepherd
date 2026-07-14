@@ -86,19 +86,15 @@ async function issueTitle(repoPath: string, n: string): Promise<string | null> {
   return title;
 }
 
-function shorten(s: string, max = 56): string {
-  const one = s.replace(/\s+/g, ' ').trim();
-  return one.length > max ? one.slice(0, max - 1) + '…' : one;
-}
-
-/** Overlay GitHub issue titles onto issue-worktree sessions (best effort). */
+/** Overlay GitHub issue titles onto issue-worktree sessions (best effort).
+ *  Names are sent in full — the UI truncates for display and reveals the rest on hover. */
 async function enrich(models: AgentModel[]): Promise<void> {
   await Promise.all(
     models.map(async (m) => {
       const n = issueNumber(m.label, m.branch);
       if (!n) return;
       const t = await issueTitle(m.repoPath, n);
-      if (t) m.name = shorten(t);
+      if (t) m.name = t.trim();
     }),
   );
 }

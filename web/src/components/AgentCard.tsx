@@ -22,7 +22,7 @@ export function AgentCard({ agent, now }: { agent: AgentModel; now: number }) {
         <span className="card__ago">{ago}</span>
       </div>
 
-      <div className="card__name" title={`${agent.label}  ·  ${agent.cwd}`}>
+      <div className="card__name" title={`${agent.name}\n${agent.label} · ${agent.cwd}`}>
         {agent.name}
       </div>
 
@@ -30,7 +30,7 @@ export function AgentCard({ agent, now }: { agent: AgentModel; now: number }) {
         <div className="card__kind">{agent.action === 'approve' ? '⏸ APPROVE' : '❔ QUESTION'}</div>
       )}
 
-      <div className="pips" aria-label={`stage ${agent.stage}`}>
+      <div className="pips" aria-label={`stage ${agent.stage}`} title={`stage: ${agent.stage}`}>
         {STAGES.map((_, i) => {
           const cls = cur < 0 ? '' : i < cur ? 'g' : i === cur ? (needs ? 'a' : 'g') : '';
           return <i key={i} className={cls} />;
@@ -44,7 +44,9 @@ export function AgentCard({ agent, now }: { agent: AgentModel; now: number }) {
         ))}
       </div>
 
-      <div className={`card__status${needs ? ' card__status--needs' : ''}`}>{agent.status}</div>
+      <div className={`card__status${needs ? ' card__status--needs' : ''}`} title={agent.status}>
+        {agent.status}
+      </div>
     </div>
   );
 }

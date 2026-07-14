@@ -34,14 +34,29 @@ function textOf(content: unknown): string {
   return '';
 }
 
-function describeTool(name: string | undefined): string {
-  const n = (name ?? '').toLowerCase();
-  if (n.includes('edit') || n.includes('write')) return 'editing files';
-  if (n.includes('bash') || n.includes('powershell')) return 'running a command';
-  if (n.includes('read')) return 'reading files';
-  if (n.includes('grep') || n.includes('glob')) return 'searching the repo';
-  if (n.includes('task') || n.includes('agent')) return 'running a subagent';
-  return name ? `using ${name}` : 'working…';
+/** A specific description of a single tool call, from its inputs. */
+function toolDetail(name: string, input: Record<string, unknown>): string {
+  const n = name.toLowerCase();
+  const base = (p: unknown) =>
+    typeof p === 'string' ? (p.replace(/\\/g, '/').split('/').filter(Boolean).pop() ?? '') : '';
+  if (/edit|write|notebook/.test(n) && input.file_path) return `editing ${base(input.file_path)}`;
+  if (n.includes('read') && input.file_path) return `reading ${base(input.file_path)}`;
+  if (n.includes('grep') && input.pattern) return `grep "${gist(String(input.pattern), 40)}"`;
+  if (n.includes('glob') && input.pattern) return `find ${gist(String(input.pattern), 40)}`;
+  if ((n.includes('bash') || n.includes('powershell')) && input.command)
+    return gist(String(input.command), 90);
+  if ((n.includes('task') || n.includes('agent')) && (input.description || input.subagent_type))
+    return `subagent: ${String(input.description ?? input.subagent_type)}`;
+  return '';
+}
+
+/** What a working agent is meaningfully doing now: the tool's own description
+ *  (active-voice, human) → the agent's latest narration → a specific tool detail. */
+function workingStatus(name: string, input: Record<string, unknown>, narration: string): string {
+  const desc = typeof input.description === 'string' ? input.description.trim() : '';
+  if (desc) return gist(desc, 200);
+  if (narration) return gist(narration, 200);
+  return toolDetail(name, input) || 'working…';
 }
 
 /** The stage is whatever the agent was most recently doing. */
@@ -64,7 +79,8 @@ export async function parseSession(file: string, now: number): Promise<AgentMode
 
   let lastAssistantText = '';
   let lastAssistantStop: string | null = null;
-  let lastToolNames: string[] = [];
+  let lastToolName = '';
+  let lastToolInput: Record<string, unknown> = {};
   let lastUserText = '';
   let lastEventKind = '';
   const stageSignals: Stage[] = [];
@@ -132,7 +148,9 @@ export async function parseSession(file: string, now: number): Promise<AgentMode
           ? m.content.filter((c: any) => c?.type === 'tool_use')
           : [];
         if (tools.length) {
-          lastToolNames = tools.map((c: any) => String(c.name ?? ''));
+          const last = tools[tools.length - 1];
+          lastToolName = String(last.name ?? '');
+          lastToolInput = (last.input ?? {}) as Record<string, unknown>;
           for (const c of tools) {
             const name = String(c.name ?? '');
             const input = JSON.stringify(c.input ?? {}).toLowerCase();
@@ -170,20 +188,21 @@ export async function parseSession(file: string, now: number): Promise<AgentMode
     // paused on a tool call in an ask-for-permission mode → blocked on you
     state = 'needs-you';
     action = 'approve';
-    status = `wants: ${describeTool(lastToolNames.at(-1))}`;
+    const desc = typeof lastToolInput.description === 'string' ? lastToolInput.description.trim() : '';
+    status = `wants: ${desc ? gist(desc, 160) : toolDetail(lastToolName, lastToolInput) || 'to run a tool'}`;
   } else if (finishedTurn && endsWithQuestion && idleMs < STALE_MS) {
     state = 'needs-you';
     action = 'question';
-    status = gist(lastAssistantText);
+    status = gist(lastAssistantText, 200);
   } else if (activelyRunning && lastEventKind !== 'user') {
     state = 'working';
-    status = lastToolNames.length ? describeTool(lastToolNames.at(-1)) : gist(lastAssistantText) || 'working…';
+    status = workingStatus(lastToolName, lastToolInput, lastAssistantText);
   } else if (activelyRunning && lastEventKind === 'user') {
     state = 'working';
     status = 'thinking…';
   } else {
     state = 'idle';
-    status = gist(lastAssistantText) || gist(lastUserText) || 'idle';
+    status = gist(lastAssistantText, 200) || gist(lastUserText, 200) || 'idle';
   }
 
   return {
