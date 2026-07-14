@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentModel, ActionKind, AgentState, Stage } from './types.js';
+import type { HookState } from './hookState.js';
 
 /** Recent activity within this window ⇒ the agent is actively working. */
 const ACTIVE_WINDOW_MS = 60_000;
@@ -67,7 +68,11 @@ function pickStage(signals: Stage[]): Stage {
  * Parse one session transcript into an AgentModel.
  * Returns null for transcripts with no real working context (no cwd).
  */
-export async function parseSession(file: string, now: number): Promise<AgentModel | null> {
+export async function parseSession(
+  file: string,
+  now: number,
+  hook?: HookState,
+): Promise<AgentModel | null> {
   let cwd: string | null = null;
   let branch: string | null = null;
   let sessionId = path.basename(file, '.jsonl');
@@ -191,7 +196,38 @@ export async function parseSession(file: string, now: number): Promise<AgentMode
   const wantsTool = lastEventKind === 'assistant' && lastAssistantStop === 'tool_use';
   const endsWithQuestion = /\?["')\]]*\s*$/.test(lastAssistantText);
 
-  if (wantsTool && !autoRuns && idleMs > 2_000 && idleMs < STALE_MS) {
+  if (hook?.state === 'working') {
+    // exact: Claude Code told us it's running (incl. while subagents work)
+    state = 'working';
+    status = lastToolName
+      ? workingStatus(lastToolName, lastToolInput, lastAssistantText)
+      : hook.tool
+        ? `running ${hook.tool}`
+        : gist(lastAssistantText, 200) || 'working…';
+  } else if (hook?.state === 'needs-you') {
+    // exact: a Notification fired — it wants your attention
+    state = 'needs-you';
+    if (endsWithQuestion) {
+      action = 'question';
+      status = gist(lastAssistantText, 200);
+    } else {
+      action = 'approve';
+      const d = typeof lastToolInput.description === 'string' ? lastToolInput.description.trim() : '';
+      status = wantsTool
+        ? `wants: ${d ? gist(d, 160) : toolDetail(lastToolName, lastToolInput) || 'to run a tool'}`
+        : 'needs your attention';
+    }
+  } else if (hook?.state === 'idle') {
+    // exact: the turn stopped — but a trailing question still needs you
+    if (endsWithQuestion && idleMs < STALE_MS) {
+      state = 'needs-you';
+      action = 'question';
+      status = gist(lastAssistantText, 200);
+    } else {
+      state = 'idle';
+      status = gist(lastAssistantText, 200) || gist(lastUserText, 200) || 'idle';
+    }
+  } else if (wantsTool && !autoRuns && idleMs > 2_000 && idleMs < STALE_MS) {
     // paused on a tool call in an ask-for-permission mode → blocked on you
     state = 'needs-you';
     action = 'approve';

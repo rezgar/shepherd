@@ -4,6 +4,7 @@ import { readdir } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { parseSession } from './parse.js';
+import { readHookStates } from './hookState.js';
 import type { AgentModel } from './types.js';
 
 const pexec = promisify(execFile);
@@ -101,8 +102,10 @@ async function enrich(models: AgentModel[]): Promise<void> {
 
 /** Parse every session into a model, keep the recent ones, resolve names. */
 export async function scanAll(now: number): Promise<AgentModel[]> {
-  const files = await listSessionFiles();
-  const models = await Promise.all(files.map((f) => parseSession(f, now).catch(() => null)));
+  const [files, hooks] = await Promise.all([listSessionFiles(), readHookStates(now)]);
+  const models = await Promise.all(
+    files.map((f) => parseSession(f, now, hooks.get(path.basename(f, '.jsonl'))).catch(() => null)),
+  );
   const recent = models.filter(
     (m): m is AgentModel => m !== null && now - m.lastActivity <= RECENT_WINDOW_MS,
   );
