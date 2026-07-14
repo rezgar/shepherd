@@ -70,8 +70,8 @@ async function main() {
     try {
       const t = await parseTranscript(ws.focusFile, ws.focusSession);
       if (ws.readyState === 1) ws.send(JSON.stringify(t));
-    } catch {
-      /* transcript unreadable — leave the client on its last state */
+    } catch (e) {
+      console.error('[transcript error]', ws.focusFile, e);
     }
   };
 
@@ -104,12 +104,19 @@ async function main() {
     }, 400);
   };
 
+  // Debounce transcript resends per connection — a live session's file changes
+  // many times a second, and re-sending the whole transcript each time floods
+  // the socket and thrashes the UI.
+  const tTimers = new WeakMap<FocusWs, NodeJS.Timeout>();
   const onEvt = (p: string) => {
     if (!p.endsWith('.jsonl')) return;
     rescan();
-    // Live-update any client focused on the file that just changed.
+    const np = norm(p);
     for (const c of wss.clients as Set<FocusWs>) {
-      if (c.focusFile && norm(c.focusFile) === norm(p)) void sendTranscript(c);
+      if (!c.focusFile || norm(c.focusFile) !== np) continue;
+      const prev = tTimers.get(c);
+      if (prev) clearTimeout(prev);
+      tTimers.set(c, setTimeout(() => void sendTranscript(c), 400));
     }
   };
 

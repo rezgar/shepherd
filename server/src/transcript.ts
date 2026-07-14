@@ -1,5 +1,4 @@
-import { createReadStream } from 'node:fs';
-import { createInterface } from 'node:readline';
+import { readFile } from 'node:fs/promises';
 
 export interface ChatTool {
   name: string;
@@ -59,12 +58,18 @@ function toolDetail(name: string, input: any): string {
 export async function parseTranscript(file: string, sessionId: string, limit = 80): Promise<Transcript> {
   const msgs: ChatMsg[] = [];
   let i = 0;
-  const rl = createInterface({
-    input: createReadStream(file, { encoding: 'utf8' }),
-    crlfDelay: Infinity,
-  });
 
-  for await (const line of rl) {
+  // Read a point-in-time snapshot rather than streaming to EOF — the transcript
+  // of a live session is appended to continuously, and a following stream would
+  // never resolve while the agent is mid-response.
+  let raw: string;
+  try {
+    raw = await readFile(file, 'utf8');
+  } catch {
+    return { type: 'transcript', sessionId, file, messages: [] };
+  }
+
+  for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     let o: any;
     try {

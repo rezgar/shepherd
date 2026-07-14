@@ -1,5 +1,4 @@
-import { createReadStream } from 'node:fs';
-import { createInterface } from 'node:readline';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentModel, ActionKind, AgentState, Stage } from './types.js';
 
@@ -85,12 +84,16 @@ export async function parseSession(file: string, now: number): Promise<AgentMode
   let lastEventKind = '';
   const stageSignals: Stage[] = [];
 
-  const rl = createInterface({
-    input: createReadStream(file, { encoding: 'utf8' }),
-    crlfDelay: Infinity,
-  });
+  // Snapshot read (not a streaming follow) so a live, growing transcript can't
+  // stall the scan.
+  let raw: string;
+  try {
+    raw = await readFile(file, 'utf8');
+  } catch {
+    return null;
+  }
 
-  for await (const line of rl) {
+  for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     let o: any;
     try {
