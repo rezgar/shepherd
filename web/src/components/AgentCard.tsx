@@ -1,7 +1,9 @@
 import type { AgentModel } from '../types';
 import { STAGE_LABELS, STAGES, stageIndex, humAgo } from '../lib/format';
+import { useSpinGlyph } from '../lib/useSpinGlyph';
 
 const STATE_DOT: Record<AgentModel['state'], string> = {
+  error: '#f85149',
   'needs-you': '#f0883e',
   working: '#3fb950',
   idle: '#8b949e',
@@ -26,12 +28,15 @@ export function AgentCard({
 }) {
   const needs = agent.state === 'needs-you';
   const working = agent.state === 'working';
+  const errored = agent.state === 'error';
+  const glyph = useSpinGlyph(working);
   const cur = stageIndex(agent.stage);
   const ago = humAgo(now - agent.lastActivity);
   const name = displayName ?? agent.name;
 
   const cls = [
     'card',
+    errored && 'card--error',
     needs && 'card--needs',
     working && 'card--working',
     agent.state === 'idle' && 'card--idle',
@@ -44,6 +49,7 @@ export function AgentCard({
 
   return (
     <div className={cls} onClick={onClick}>
+      {errored && <span className="badge badge--error">⚠</span>}
       {needs && <span className="badge">!</span>}
       {onHide && (
         <button
@@ -60,10 +66,8 @@ export function AgentCard({
 
       <div className="card__top">
         {working ? (
-          <span className="bars" aria-label="working" title="working">
-            <i />
-            <i />
-            <i />
+          <span className="spin" aria-label="working">
+            {glyph}
           </span>
         ) : (
           <span className="dot" style={{ background: STATE_DOT[agent.state] }} />
@@ -93,7 +97,10 @@ export function AgentCard({
         {name}
       </div>
 
-      <div className={`card__status${needs ? ' card__status--needs' : ''}`} title={agent.status}>
+      <div
+        className={`card__status${needs ? ' card__status--needs' : ''}${errored ? ' card__status--error' : ''}`}
+        title={agent.status}
+      >
         {agent.status}
       </div>
     </div>

@@ -13,7 +13,7 @@ const hookPath = fileURLToPath(new URL('../hooks/shepherd-hook.mjs', import.meta
 const command = `node "${hookPath}"`;
 
 const TOOL_EVENTS = ['PreToolUse', 'PostToolUse'];
-const PLAIN_EVENTS = ['UserPromptSubmit', 'Notification', 'Stop', 'SubagentStop'];
+const PLAIN_EVENTS = ['UserPromptSubmit', 'Notification', 'Stop', 'SubagentStop', 'StopFailure'];
 
 let settings = {};
 if (existsSync(settingsPath)) {

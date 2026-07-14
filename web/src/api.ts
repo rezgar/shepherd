@@ -21,8 +21,18 @@ export interface Shepherd {
   unfocus: () => void;
   loadMore: () => void;
   send: (sessionId: string, cwd: string, text: string, images?: string[]) => void;
+  /** Stop an in-flight reply Shepherd itself spawned for this session. */
+  cancel: (sessionId: string) => void;
   /** Sessions with an in-flight reply. */
   sendingIds: Set<string>;
+}
+
+interface PendingEcho {
+  msg: ChatMsg;
+  /** id of the message that was last in the list when this was sent — the
+   *  echo renders right after it, not always at the tail, so it doesn't jump
+   *  after real content that streams in past it while the reply is in flight. */
+  anchor: string | null;
 }
 
 function mergeTail(prev: Loaded | null, sessionId: string, tail: ChatMsg[], offset: number, total: number): Loaded {
@@ -52,6 +62,11 @@ export function useShepherd(): Shepherd {
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [sendingIds, setSendingIds] = useState<Set<string>>(() => new Set());
+  // Shown instantly on send, before the CLI round-trip writes the real transcript
+  // line — cleared once that reply lands (send-done/send-error/send-cancelled),
+  // never merged into `loaded` itself so there's no id to reconcile against the
+  // real one.
+  const [pending, setPending] = useState<Record<string, PendingEcho>>({});
 
   const wsRef = useRef<WebSocket | null>(null);
   const focusRef = useRef<{ file: string; sessionId: string } | null>(null);
@@ -82,10 +97,28 @@ export function useShepherd(): Shepherd {
           setSnap(d as Snapshot);
         } else if (d.type === 'transcript') {
           if (d.sessionId !== focusRef.current?.sessionId) return;
+          let merged: Loaded | null = null;
           setLoaded((prev) => {
             const next = mergeTail(prev, d.sessionId, d.messages, d.offset, d.total);
             cache.current.set(d.sessionId, next);
+            merged = next;
             return next;
+          });
+          // The real write can land (via the file-watcher push) before send-done
+          // fires — drop the echo the moment a real user turn shows up after the
+          // anchor point. Position-based, not text-matched: the real text can
+          // differ slightly from what was echoed (reformatting, trimming), so
+          // matching on content is unreliable — but only one send is ever in
+          // flight per session, so "a user turn landed after the anchor" is
+          // unambiguously that send's real message.
+          setPending((p) => {
+            const entry = p[d.sessionId];
+            if (!entry || !merged) return p;
+            const anchorIdx = entry.anchor ? merged.messages.findIndex((m) => m.id === entry.anchor) : -1;
+            const landed = merged.messages.slice(anchorIdx + 1).some((m) => m.role === 'user');
+            if (!landed) return p;
+            const { [d.sessionId]: _drop, ...rest } = p;
+            return rest;
           });
         } else if (d.type === 'transcriptMore') {
           if (d.sessionId !== focusRef.current?.sessionId) return;
@@ -95,12 +128,17 @@ export function useShepherd(): Shepherd {
             cache.current.set(d.sessionId, next);
             return next;
           });
-        } else if (d.type === 'send-done' || d.type === 'send-error') {
+        } else if (d.type === 'send-done' || d.type === 'send-error' || d.type === 'send-cancelled') {
           setSendingIds((s) => {
             if (!s.has(d.sessionId)) return s;
             const n = new Set(s);
             n.delete(d.sessionId);
             return n;
+          });
+          setPending((p) => {
+            if (!(d.sessionId in p)) return p;
+            const { [d.sessionId]: _drop, ...rest } = p;
+            return rest;
           });
           if (d.type === 'send-error') console.warn('[shepherd] send failed:', d.error);
         }
@@ -144,21 +182,50 @@ export function useShepherd(): Shepherd {
   const send = useCallback((sessionId: string, cwd: string, text: string, images?: string[]) => {
     wsRef.current?.send(JSON.stringify({ type: 'send', sessionId, cwd, text, images }));
     setSendingIds((s) => new Set(s).add(sessionId));
+    const st = loadedRef.current;
+    const anchor = st?.sessionId === sessionId ? (st.messages.at(-1)?.id ?? null) : null;
+    setPending((p) => ({
+      ...p,
+      [sessionId]: {
+        anchor,
+        msg: {
+          id: `pending-${sessionId}`,
+          role: 'user',
+          text,
+          tools: [],
+          images: images ?? [],
+          ts: Date.now(),
+          pending: true,
+        },
+      },
+    }));
+  }, []);
+
+  const cancel = useCallback((sessionId: string) => {
+    wsRef.current?.send(JSON.stringify({ type: 'cancel', sessionId }));
   }, []);
 
   // Only ever surface the transcript that matches the focused session — a previous
   // session's content must never linger while switching.
   const matches = !!loaded && loaded.sessionId === focusedId;
+  const echo = focusedId ? pending[focusedId] : undefined;
+  let messages: ChatMsg[] | null = matches ? loaded!.messages : echo ? [] : null;
+  if (echo && messages) {
+    const idx = echo.anchor ? messages.findIndex((m) => m.id === echo.anchor) : -1;
+    const at = idx >= 0 ? idx + 1 : messages.length;
+    messages = [...messages.slice(0, at), echo.msg, ...messages.slice(at)];
+  }
   return {
     snap,
     connected,
     focusedId,
-    messages: matches ? loaded!.messages : null,
+    messages,
     hasMore: matches ? loaded!.offset > 0 : false,
     focus,
     unfocus,
     loadMore,
     send,
+    cancel,
     sendingIds,
   };
 }

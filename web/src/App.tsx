@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useShepherd, useTick } from './api';
 import { ProjectLane } from './components/ProjectLane';
 import { FocusView } from './components/FocusView';
-import type { AgentModel } from './types';
+import { groupByProduct } from './lib/format';
+import { playDone, playError, playNeedsYou, unlockAudio } from './lib/sound';
+import type { AgentModel, AgentState } from './types';
 
 const PALETTE = ['#58a6ff', '#bc8cff', '#39c5cf', '#e3b341', '#f0883e', '#56d364', '#ff7b72', '#79c0ff'];
 const WINDOWS = [1, 4, 12, 24];
@@ -16,21 +18,8 @@ function load<T>(key: string, fallback: T): T {
   }
 }
 
-function groupByProduct(agents: AgentModel[]): [string, AgentModel[]][] {
-  const map = new Map<string, AgentModel[]>();
-  for (const a of agents) {
-    const arr = map.get(a.product) ?? [];
-    arr.push(a);
-    map.set(a.product, arr);
-  }
-  // Stable order by each product's earliest session creation — never reorder on activity.
-  return [...map.entries()].sort(
-    (a, b) => Math.min(...a[1].map((x) => x.createdAt)) - Math.min(...b[1].map((x) => x.createdAt)),
-  );
-}
-
 export function App() {
-  const { snap, connected, focusedId, messages, hasMore, focus, unfocus, loadMore, send, sendingIds } =
+  const { snap, connected, focusedId, messages, hasMore, focus, unfocus, loadMore, send, cancel, sendingIds } =
     useShepherd();
   const now = useTick(1000);
   const [windowH, setWindowH] = useState(4);
@@ -38,6 +27,7 @@ export function App() {
   const [renames, setRenames] = useState<Record<string, string>>(() => load('shepherd:names', {}));
   const [hidden, setHidden] = useState<Record<string, true>>(() => load('shepherd:hidden', {}));
   const [showHidden, setShowHidden] = useState(false);
+  const [muted, setMuted] = useState<boolean>(() => load('shepherd:muted', false));
 
   useEffect(() => {
     localStorage.setItem('shepherd:font', JSON.stringify(fontSize));
@@ -48,6 +38,44 @@ export function App() {
   useEffect(() => {
     localStorage.setItem('shepherd:hidden', JSON.stringify(hidden));
   }, [hidden]);
+  useEffect(() => {
+    localStorage.setItem('shepherd:muted', JSON.stringify(muted));
+  }, [muted]);
+
+  // Browsers suspend audio until a user gesture — warm it up on the first one.
+  useEffect(() => {
+    const onFirstInteraction = () => {
+      unlockAudio();
+      window.removeEventListener('pointerdown', onFirstInteraction);
+      window.removeEventListener('keydown', onFirstInteraction);
+    };
+    window.addEventListener('pointerdown', onFirstInteraction);
+    window.addEventListener('keydown', onFirstInteraction);
+    return () => {
+      window.removeEventListener('pointerdown', onFirstInteraction);
+      window.removeEventListener('keydown', onFirstInteraction);
+    };
+  }, []);
+
+  // Ding on state transitions: done (working → idle), needs-you (anything →
+  // needs-you), error (anything → error). Never on the first snapshot seen
+  // for a session — that would ding for states that already existed before
+  // Shepherd connected/reconnected, not a fresh transition.
+  const prevStates = useRef<Map<string, AgentState>>(new Map());
+  const mutedRef = useRef(muted);
+  mutedRef.current = muted;
+  useEffect(() => {
+    if (!snap) return;
+    const prev = prevStates.current;
+    for (const a of snap.agents) {
+      const was = prev.get(a.sessionId);
+      prev.set(a.sessionId, a.state);
+      if (was === undefined || was === a.state || mutedRef.current) continue;
+      if (a.state === 'error') playError();
+      else if (a.state === 'needs-you') playNeedsYou();
+      else if (a.state === 'idle' && was === 'working') playDone();
+    }
+  }, [snap]);
 
   const colorMap = useMemo(() => {
     const names = snap ? [...new Set(snap.agents.map((a) => a.product))].sort() : [];
@@ -80,8 +108,8 @@ export function App() {
   const shownVisible = allVisible.filter((a) => !hidden[a.sessionId]);
   const hiddenVisible = allVisible.filter((a) => hidden[a.sessionId]);
   const groups = groupByProduct(shownVisible);
-  // Same order the cards render in — Alt+N jumps to the Nth card, reading order.
-  const flatOrder = groups.flatMap(([, ags]) => [...ags].sort((a, b) => a.createdAt - b.createdAt));
+  // Same shared order the top strip and canvas lanes render in — Alt+N jumps to the Nth card.
+  const flatOrder = groups.flatMap(([, ags]) => ags);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -125,6 +153,7 @@ export function App() {
         onFontSize={changeFont}
         onSend={send}
         sending={sendingIds.has(focused.sessionId)}
+        onCancel={cancel}
         onHide={hide}
       />
     );
@@ -132,6 +161,7 @@ export function App() {
 
   const needsYou = shownVisible.filter((a) => a.state === 'needs-you').length;
   const working = shownVisible.filter((a) => a.state === 'working').length;
+  const errored = shownVisible.filter((a) => a.state === 'error').length;
 
   return (
     <div className="shell">
@@ -145,6 +175,12 @@ export function App() {
               <b className="c-need">{needsYou} need you</b>
             </>
           )}
+          {errored > 0 && (
+            <>
+              {' · '}
+              <b className="c-error">{errored} errored</b>
+            </>
+          )}
         </span>
         <label className="winsel">
           active last
@@ -156,6 +192,9 @@ export function App() {
             ))}
           </select>
         </label>
+        <button className="mute-toggle" onClick={() => setMuted((m) => !m)} title={muted ? 'Unmute sounds' : 'Mute sounds'}>
+          {muted ? '🔕' : '🔔'}
+        </button>
         {hiddenVisible.length > 0 && (
           <button className="hidden-toggle" onClick={() => setShowHidden((s) => !s)}>
             {hiddenVisible.length} hidden {showHidden ? '▴' : '▾'}

@@ -25,8 +25,11 @@ const mdComponents = {
 
 function Message({ msg }: { msg: ChatMsg }) {
   return (
-    <div className={`msg msg--${msg.role}`}>
-      <div className="msg__role">{msg.role === 'user' ? 'You' : 'Agent'}</div>
+    <div className={`msg msg--${msg.role}${msg.pending ? ' msg--pending' : ''}`}>
+      <div className="msg__role">
+        {msg.role === 'user' ? 'You' : 'Agent'}
+        {msg.pending && <span className="msg__pending-tag">sending…</span>}
+      </div>
       {msg.text && (
         <div className="md">
           <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>

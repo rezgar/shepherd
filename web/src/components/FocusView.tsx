@@ -3,6 +3,7 @@ import type { AgentModel, ChatMsg } from '../types';
 import { CardStrip } from './CardStrip';
 import { ChatTranscript } from './ChatTranscript';
 import { Composer } from './Composer';
+import { WorkingIndicator } from './WorkingIndicator';
 
 export function FocusView({
   agents,
@@ -20,6 +21,7 @@ export function FocusView({
   onFontSize,
   onSend,
   sending,
+  onCancel,
   onHide,
 }: {
   agents: AgentModel[];
@@ -37,6 +39,7 @@ export function FocusView({
   onFontSize: (delta: number) => void;
   onSend: (sessionId: string, cwd: string, text: string, images?: string[]) => void;
   sending: boolean;
+  onCancel: (sessionId: string) => void;
   onHide: (sessionId: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -45,11 +48,17 @@ export function FocusView({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !editing) onExit();
+      if (e.key !== 'Escape' || editing) return;
+      if (sending) {
+        e.preventDefault();
+        onCancel(focused.sessionId);
+      } else {
+        onExit();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onExit, editing]);
+  }, [onExit, onCancel, editing, sending, focused.sessionId]);
 
   const lastUser = messages?.filter((m) => m.role === 'user').at(-1)?.text ?? null;
 
@@ -100,7 +109,7 @@ export function FocusView({
             <button onClick={() => onFontSize(-1)}>A−</button>
             <button onClick={() => onFontSize(1)}>A+</button>
           </span>
-          <span className="focus__hint">Esc = canvas</span>
+          <span className="focus__hint">{sending ? 'Esc = stop' : 'Esc = canvas'}</span>
         </span>
       </div>
 
@@ -115,6 +124,8 @@ export function FocusView({
       />
 
       <ChatTranscript key={focused.sessionId} messages={messages} hasMore={hasMore} onLoadMore={onLoadMore} />
+
+      {focused.state === 'working' && <WorkingIndicator status={focused.status} />}
 
       <Composer
         lastUserMessage={lastUser}

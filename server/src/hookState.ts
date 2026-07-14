@@ -13,6 +13,8 @@ export interface HookState {
   state: AgentState;
   event: string;
   tool: string | null;
+  /** Set when event is StopFailure — why the session terminated. */
+  errorType: string | null;
   ts: number;
 }
 

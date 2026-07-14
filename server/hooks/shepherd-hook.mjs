@@ -19,6 +19,7 @@ const EVENT_STATE = {
   SubagentStop: 'working', // a subagent finished; the parent is still going
   Notification: 'needs-you', // permission prompt / idle-waiting — needs attention
   Stop: 'idle', // main turn finished — the user's move
+  StopFailure: 'error', // session terminated on a rate limit / API / billing error
 };
 
 let input = '';
@@ -35,7 +36,13 @@ process.stdin.on('end', () => {
       mkdirSync(dir, { recursive: true });
       writeFileSync(
         join(dir, `${sid}.json`),
-        JSON.stringify({ state, event, tool: e.tool_name ?? null, ts: Date.now() }),
+        JSON.stringify({
+          state,
+          event,
+          tool: e.tool_name ?? null,
+          errorType: e.error_type ?? null,
+          ts: Date.now(),
+        }),
       );
     }
   } catch {

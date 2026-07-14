@@ -1,4 +1,4 @@
-export type AgentState = 'working' | 'needs-you' | 'idle';
+export type AgentState = 'working' | 'needs-you' | 'idle' | 'error';
 
 export type Stage =
   | 'definition'

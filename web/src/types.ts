@@ -1,5 +1,5 @@
 // Mirror of the server wire types (@shepherd/server/src/types.ts).
-export type AgentState = 'working' | 'needs-you' | 'idle';
+export type AgentState = 'working' | 'needs-you' | 'idle' | 'error';
 
 export type Stage =
   | 'definition'
@@ -48,6 +48,8 @@ export interface ChatMsg {
   tools: ChatTool[];
   images: string[];
   ts: number;
+  /** Optimistic local echo, not yet confirmed written by the real transcript. */
+  pending?: boolean;
 }
 
 export interface Transcript {

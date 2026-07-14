@@ -7,7 +7,7 @@ import type { Snapshot } from './types.js';
 
 const PORT = 4177;
 
-const STATE_ORDER = { 'needs-you': 0, working: 1, idle: 2 } as const;
+const STATE_ORDER = { error: 0, 'needs-you': 1, working: 2, idle: 3 } as const;
 
 /** A connection remembers which session (if any) it is focused on. */
 interface FocusWs extends WebSocket {
@@ -58,6 +58,8 @@ async function main() {
 
   let current = snap;
   const wss = new WebSocketServer({ port: PORT });
+  // In-flight sends this daemon spawned, by session id — lets Esc cancel one.
+  const inFlight = new Map<string, { cancel: () => void }>();
   console.log(`[shepherd] ws://localhost:${PORT} — watching ${PROJECTS_DIR}`);
   console.log(`[shepherd] ${current.agents.length} agents at boot`);
 
@@ -125,19 +127,29 @@ async function main() {
         ws.focusSession = undefined;
       } else if (m.type === 'send' && m.sessionId && m.cwd && typeof m.text === 'string' && m.text.trim()) {
         if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'send-ack', sessionId: m.sessionId }));
-        sendToSession(
+        const handle = sendToSession(
           m.sessionId,
           m.cwd,
           m.text,
           Array.isArray(m.images) ? m.images : undefined,
           () => {
+            inFlight.delete(m.sessionId);
             if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'send-done', sessionId: m.sessionId }));
             void sendWindow(ws); // nudge a transcript refresh in case the file-watch is slow
           },
           (error) => {
+            inFlight.delete(m.sessionId);
             if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'send-error', sessionId: m.sessionId, error }));
           },
+          () => {
+            inFlight.delete(m.sessionId);
+            if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'send-cancelled', sessionId: m.sessionId }));
+            void sendWindow(ws);
+          },
         );
+        inFlight.set(m.sessionId, handle);
+      } else if (m.type === 'cancel' && m.sessionId) {
+        inFlight.get(m.sessionId)?.cancel();
       }
     });
   });

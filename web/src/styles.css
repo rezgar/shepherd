@@ -51,6 +51,21 @@ body {
   color: var(--amber);
   font-weight: 700;
 }
+.c-error {
+  color: #f85149;
+  font-weight: 700;
+}
+.mute-toggle {
+  background: transparent;
+  border: none;
+  font-size: 15px;
+  cursor: pointer;
+  opacity: 0.75;
+  padding: 2px 4px;
+}
+.mute-toggle:hover {
+  opacity: 1;
+}
 .winsel {
   margin-left: auto;
   display: flex;
@@ -214,6 +229,14 @@ body {
   background: linear-gradient(180deg, #241505, #1a0f04);
   border: 1.5px solid var(--amber);
   box-shadow: 0 0 0 3px #f0883e22, 0 0 16px #f0883e33;
+}
+.card--error {
+  background: linear-gradient(180deg, #2a0d0d, #1a0808);
+  border: 1.5px solid #f85149;
+  box-shadow: 0 0 0 3px #f8514922, 0 0 16px #f8514933;
+}
+.badge--error {
+  background: #f85149;
 }
 .badge {
   position: absolute;
@@ -523,6 +546,17 @@ body {
 .msg--user .msg__role {
   color: #79c0ff;
 }
+.msg--pending {
+  opacity: 0.6;
+}
+.msg__pending-tag {
+  margin-left: 6px;
+  font-weight: 500;
+  font-style: italic;
+  color: var(--muted);
+  text-transform: none;
+  letter-spacing: 0;
+}
 .msg--assistant .msg__role {
   color: #8b949e;
 }
@@ -642,6 +676,29 @@ body {
   height: auto;
 }
 
+/* ---- working indicator (bottom of chat) ---- */
+.working-indicator {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 18px;
+  font-size: 12.5px;
+  color: #7ee787;
+  background: #0d1712;
+  border-top: 1px solid #1c3324;
+}
+.working-indicator__glyph {
+  font-weight: 700;
+  color: #3fb950;
+}
+.working-indicator__text {
+  color: #a3d9ac;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ---- composer ---- */
 .composer {
   flex: 0 0 auto;
@@ -737,40 +794,13 @@ body {
 }
 
 /* working indicator — animated bars (a dot is hard to read at a glance) */
-.bars {
-  display: inline-flex;
-  align-items: flex-end;
-  gap: 2px;
-  height: 10px;
+.spin {
+  display: inline-block;
   flex: 0 0 auto;
-}
-.bars i {
-  width: 3px;
-  height: 100%;
-  background: #3fb950;
-  border-radius: 1px;
-  transform-origin: bottom;
-  animation: bars 0.9s ease-in-out infinite;
-}
-.bars i:nth-child(1) {
-  animation-delay: 0s;
-}
-.bars i:nth-child(2) {
-  animation-delay: 0.15s;
-}
-.bars i:nth-child(3) {
-  animation-delay: 0.3s;
-}
-@keyframes bars {
-  0%,
-  100% {
-    transform: scaleY(0.35);
-    opacity: 0.55;
-  }
-  50% {
-    transform: scaleY(1);
-    opacity: 1;
-  }
+  color: #3fb950;
+  font-weight: 700;
+  font-size: 13px;
+  width: 10px;
 }
 .card--working {
   border-color: #24402c;

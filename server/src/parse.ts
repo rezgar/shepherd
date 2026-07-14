@@ -50,18 +50,36 @@ function toolDetail(name: string, input: Record<string, unknown>): string {
   return '';
 }
 
-/** What a working agent is meaningfully doing now: the tool's own description
- *  (active-voice, human) → the agent's latest narration → a specific tool detail. */
-function workingStatus(name: string, input: Record<string, unknown>, narration: string): string {
+/** What a working agent is meaningfully doing right now: the tool's own
+ *  description (active-voice, human) → a specific detail pulled from its
+ *  inputs → a generic placeholder. Never the agent's last spoken sentence —
+ *  that's what it already said, not what it's doing this instant. */
+function workingStatus(name: string, input: Record<string, unknown>): string {
   const desc = typeof input.description === 'string' ? input.description.trim() : '';
   if (desc) return gist(desc, 200);
-  if (narration) return gist(narration, 200);
-  return toolDetail(name, input) || 'working…';
+  return toolDetail(name, input) || 'thinking…';
 }
 
 /** The stage is whatever the agent was most recently doing. */
 function pickStage(signals: Stage[]): Stage {
   return signals.at(-1) ?? 'unknown';
+}
+
+const ERROR_LABELS: Record<string, string> = {
+  rate_limit: 'hit a rate limit',
+  overloaded: 'API overloaded',
+  server_error: 'API server error',
+  billing_error: 'billing issue',
+  max_output_tokens: 'hit max output length',
+  authentication_failed: 'authentication failed',
+  oauth_org_not_allowed: 'OAuth org not allowed',
+  invalid_request: 'invalid request',
+  model_not_found: 'model not found',
+};
+
+function errorStatus(errorType: string | null): string {
+  if (!errorType) return 'session stopped on an error';
+  return ERROR_LABELS[errorType] ?? `error: ${errorType}`;
 }
 
 /**
@@ -196,14 +214,14 @@ export async function parseSession(
   const wantsTool = lastEventKind === 'assistant' && lastAssistantStop === 'tool_use';
   const endsWithQuestion = /\?["')\]]*\s*$/.test(lastAssistantText);
 
-  if (hook?.state === 'working') {
+  if (hook?.state === 'error') {
+    // exact: StopFailure fired — the session terminated on a rate limit / API / billing error
+    state = 'error';
+    status = errorStatus(hook.errorType);
+  } else if (hook?.state === 'working') {
     // exact: Claude Code told us it's running (incl. while subagents work)
     state = 'working';
-    status = lastToolName
-      ? workingStatus(lastToolName, lastToolInput, lastAssistantText)
-      : hook.tool
-        ? `running ${hook.tool}`
-        : gist(lastAssistantText, 200) || 'working…';
+    status = lastToolName ? workingStatus(lastToolName, lastToolInput) : hook.tool ? `running ${hook.tool}` : 'thinking…';
   } else if (hook?.state === 'needs-you') {
     // exact: a Notification fired — it wants your attention
     state = 'needs-you';
@@ -241,10 +259,10 @@ export async function parseSession(
     // executing a tool (including a subagent) in an auto-approving mode — the
     // session is still running even if it hasn't written for a while.
     state = 'working';
-    status = workingStatus(lastToolName, lastToolInput, lastAssistantText);
+    status = workingStatus(lastToolName, lastToolInput);
   } else if (activelyRunning && lastEventKind !== 'user') {
     state = 'working';
-    status = workingStatus(lastToolName, lastToolInput, lastAssistantText);
+    status = workingStatus(lastToolName, lastToolInput);
   } else if (activelyRunning && lastEventKind === 'user') {
     state = 'working';
     status = 'thinking…';
