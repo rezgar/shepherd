@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent Shepherd — A + action emphasis</title>
+<style>
+  body{margin:0;background:#010409;color:#e6edf3;font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;padding:24px;line-height:1.5}
+  h1{font-size:20px;margin:0 0 4px}
+  .sub{color:#8b949e;font-size:14px;margin:0 0 22px;max-width:900px}
+  .label{font-size:11px;letter-spacing:.8px;color:#6e7681;font-weight:700;margin:20px 0 8px}
+  .app{background:#0d1117;border:1px solid #30363d;border-radius:10px;overflow:hidden;box-shadow:0 10px 34px rgba(0,0,0,.45)}
+  code{background:#21262d;padding:1px 5px;border-radius:4px;font-family:ui-monospace,monospace;font-size:.9em}
+  .card{width:150px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:7px 8px;flex:0 0 auto}
+  .ctitle{display:flex;gap:5px;align-items:center;margin-bottom:5px}
+  .ctitle b{font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto}
+  .pips{display:flex;gap:2px;margin-bottom:4px}
+  .pips i{flex:1;height:3px;border-radius:2px;background:#21262d}
+  .pips i.g{background:#3fb950}.pips i.a{background:#f0883e}
+  .cstat{font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cur{border:1.5px solid #58a6ff;box-shadow:0 0 0 3px #58a6ff22}
+  /* ACTION EMPHASIS */
+  .act{background:linear-gradient(180deg,#2a1808,#1b1005);border:1.5px solid #f0883e;transform:translateY(-3px);animation:pulse 2.2s ease-in-out infinite}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 3px #f0883e26,0 0 9px #f0883e22}50%{box-shadow:0 0 0 3px #f0883e4d,0 0 22px #f0883e55}}
+  .actpill{display:inline-block;font-size:9px;font-weight:800;letter-spacing:.4px;color:#0a0500;background:#f0883e;padding:2px 7px;border-radius:5px;margin-bottom:6px}
+  .needbadge{background:#f0883e;color:#0a0500;font-weight:800;font-size:10px;padding:1px 7px;border-radius:10px;margin-left:6px}
+  .tabbar{color:#04121f;font-size:11px;font-weight:800;padding:3px 10px;border-radius:7px 7px 0 0;display:flex;align-items:center}
+  .lane{display:flex;gap:7px;padding:8px 7px;border-top:none;border-radius:0 0 8px 8px}
+</style></head><body>
+
+<h1>🐑 A grouping + loud "needs you" cards</h1>
+<p class="sub">Agents that need action get a <b>hot amber card</b> (raised, glowing, softly pulsing) with an explicit <code>⏸ APPROVE</code> / <code>❔ ANSWER</code> pill. Each project tab shows a <b>count of agents waiting on you</b>. Working/done stay quiet so the hot ones win your eye.</p>
+
+<div class="label">FOCUS MODE — top strip</div>
+<div class="app">
+  <div style="display:flex;align-items:center;gap:10px;padding:9px 14px;background:#161b22;border-bottom:1px solid #30363d;font-size:13px">
+    <span style="color:#8b949e">⌂ canvas</span><span style="color:#6e7681">/</span><span style="color:#58a6ff">wikifix</span><span style="color:#6e7681">/</span><span style="font-weight:700">main</span>
+    <span style="flex:1"></span><span style="font-size:12px;color:#f0883e;font-weight:600">2 need you</span><span style="font-size:12px;color:#6e7681">· ⌘K · Esc</span>
+  </div>
+
+  <div style="display:flex;gap:14px;padding:14px 12px 12px;background:#080b10;border-bottom:1px solid #30363d;overflow-x:auto">
+
+    <!-- wikifix -->
+    <div style="flex:0 0 auto">
+      <div class="tabbar" style="background:#58a6ff">wikifix · 3 <span class="needbadge">⏸ 1</span></div>
+      <div class="lane" style="background:#0d1320;border:1px solid #1f2a3d">
+        <div class="card act">
+          <div class="actpill">⏸ APPROVE</div>
+          <div class="ctitle"><span class="dot" style="background:#f0883e"></span><b>issue-397</b></div>
+          <div class="pips"><i class="g"></i><i class="g"></i><i class="g"></i><i class="a"></i><i></i></div>
+          <div class="cstat" style="color:#ffb782">wants: run integration tests</div>
+        </div>
+        <div class="card cur">
+          <div class="ctitle"><span class="dot" style="background:#3fb950"></span><b>main</b></div>
+          <div class="pips"><i class="g"></i><i class="g"></i><i class="g"></i><i></i><i></i></div>
+          <div class="cstat" style="color:#8b949e">✎ telemetry allow-list</div>
+        </div>
+        <div class="card">
+          <div class="ctitle"><span class="dot" style="background:#3fb950"></span><b>issue-404</b></div>
+          <div class="pips"><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i></i></div>
+          <div class="cstat" style="color:#8b949e">✎ reconcile E2E</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- cloud -->
+    <div style="flex:0 0 auto">
+      <div class="tabbar" style="background:#bc8cff;color:#160a24">skills-for-jira-cloud · 2 <span class="needbadge">❔ 1</span></div>
+      <div class="lane" style="background:#150e20;border:1px solid #2c2140">
+        <div class="card act">
+          <div class="actpill">❔ ANSWER</div>
+          <div class="ctitle"><span class="dot" style="background:#f0883e"></span><b>main</b></div>
+          <div class="pips"><i class="g"></i><i class="a"></i><i></i><i></i><i></i></div>
+          <div class="cstat" style="color:#ffb782">“which auth model for the picker?”</div>
+        </div>
+        <div class="card" style="opacity:.75">
+          <div class="ctitle"><span class="dot" style="background:#3fb950"></span><b>issue-108</b></div>
+          <div class="pips"><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i></div>
+          <div class="cstat" style="color:#3fb950">✅ done · PR #112</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- datacenter (no action) -->
+    <div style="flex:0 0 auto">
+      <div class="tabbar" style="background:#39c5cf;color:#04191b">skills-for-jira-datacenter · 1</div>
+      <div class="lane" style="background:#08191b;border:1px solid #1c3538">
+        <div class="card">
+          <div class="ctitle"><span class="dot" style="background:#3fb950"></span><b>main</b></div>
+          <div class="pips"><i class="g"></i><i></i><i></i><i></i><i></i></div>
+          <div class="cstat" style="color:#8b949e">🔎 perf scan</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="padding:16px 18px;min-height:120px;color:#6e7681;font-size:13px">…big chat for the focused agent renders here (markdown · mermaid · images), ~85% of the screen…</div>
+</div>
+
+<p class="sub">Distinct enough for the ones needing action? I can dial the heat up (red for questions vs amber for approvals, bigger cards, a badge that follows into the overview canvas too) or down (glow only, no pulse). Say the word and I lock the design + start building Slice 1.</p>
+</body></html>

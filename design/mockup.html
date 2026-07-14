@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent Shepherd — design mockup v4</title>
+<style>
+  body{margin:0;background:#010409;color:#e6edf3;font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;padding:24px;line-height:1.5}
+  h1{font-size:20px;margin:0 0 4px}
+  .sub{color:#8b949e;font-size:14px;margin:0 0 20px;max-width:900px}
+  .label{font-size:11px;letter-spacing:.8px;color:#6e7681;font-weight:700;margin:22px 0 8px}
+  code{background:#21262d;padding:1px 5px;border-radius:4px;font-family:ui-monospace,monospace;font-size:.9em}
+  .app{background:#0d1117;border:1px solid #30363d;border-radius:10px;overflow:hidden;box-shadow:0 10px 34px rgba(0,0,0,.45)}
+  .card{width:150px;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:7px 8px}
+  .ctitle{display:flex;gap:5px;align-items:center;margin-bottom:5px}
+  .ctitle span{font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto}
+  .pips{display:flex;gap:2px;margin-bottom:4px}
+  .pips i{flex:1;height:3px;border-radius:2px;background:#21262d}
+  .pips i.g{background:#3fb950}.pips i.a{background:#f0883e}
+  .cstat{font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+</style></head><body>
+
+<h1>🐑 Agent Shepherd — mockup v4</h1>
+<p class="sub">Top strip now groups agents into <b>distinct per-project lanes</b> (bounded, color-headed) so you can tell projects apart at a glance while switching. Chat still owns ~85%.</p>
+
+<div class="label">FOCUS MODE — distinct project lanes in the strip, full chat below</div>
+<div class="app">
+
+  <!-- breadcrumb -->
+  <div style="display:flex;align-items:center;gap:10px;padding:9px 14px;background:#161b22;border-bottom:1px solid #30363d;font-size:13px">
+    <span style="color:#8b949e;cursor:pointer">⌂ canvas</span><span style="color:#6e7681">/</span><span style="color:#58a6ff">wikifix</span><span style="color:#6e7681">/</span><span style="font-weight:700">issue-397</span>
+    <span style="flex:1"></span>
+    <span style="font-size:12px;color:#6e7681">⌘K switch · Esc = canvas</span>
+  </div>
+
+  <!-- STRIP: distinct project lanes -->
+  <div style="display:flex;gap:12px;padding:11px 12px;background:#080b10;border-bottom:1px solid #30363d;overflow-x:auto">
+
+    <!-- lane: wikifix (blue) -->
+    <div style="flex:0 0 auto;background:#0d1320;border:1px solid #1f2a3d;border-left:3px solid #58a6ff;border-radius:10px;padding:8px 9px">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:7px">
+        <span style="font-size:10.5px;font-weight:700;color:#58a6ff;background:#12233d;padding:2px 8px;border-radius:20px">wikifix</span>
+        <span style="font-size:10px;color:#6e7681">3 agents</span>
+      </div>
+      <div style="display:flex;gap:8px">
+        <div class="card" style="border:1.5px solid #58a6ff;box-shadow:0 0 0 3px #58a6ff22">
+          <div class="ctitle"><span class="dot" style="background:#f0883e"></span><span>issue-397</span></div>
+          <div class="pips"><i class="g"></i><i class="g"></i><i class="g"></i><i class="a"></i><i></i></div>
+          <div class="cstat" style="color:#f0883e">⏸ approve tests?</div>
+        </div>
+        <div class="card">
+          <div class="ctitle"><span class="dot" style="background:#3fb950"></span><span>main</span></div>
+          <div class="pips"><i class="g"></i><i class="g"></i><i class="g"></i><i></i><i></i></div>
+          <div class="cstat" style="color:#8b949e">✎ telemetry allow-list</div>
+        </div>
+        <div class="card">
+          <div class="ctitle"><span class="dot" style="background:#3fb950"></span><span>issue-404</span></div>
+          <div class="pips"><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i></i></div>
+          <div class="cstat" style="color:#8b949e">✎ reconcile E2E</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- lane: skills-for-jira-cloud (purple) -->
+    <div style="flex:0 0 auto;background:#150e20;border:1px solid #2c2140;border-left:3px solid #bc8cff;border-radius:10px;padding:8px 9px">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:7px">
+        <span style="font-size:10.5px;font-weight:700;color:#bc8cff;background:#241833;padding:2px 8px;border-radius:20px">skills-for-jira-cloud</span>
+        <span style="font-size:10px;color:#6e7681">2</span>
+      </div>
+      <div style="display:flex;gap:8px">
+        <div class="card" style="border-color:#f0883e">
+          <div class="ctitle"><span class="dot" style="background:#f0883e"></span><span>main</span></div>
+          <div class="pips"><i class="g"></i><i class="a"></i><i></i><i></i><i></i></div>
+          <div class="cstat" style="color:#f0883e">❔ auth model?</div>
+        </div>
+        <div class="card" style="border-color:#238636;opacity:.85">
+          <div class="ctitle"><span class="dot" style="background:#3fb950"></span><span>issue-108</span></div>
+          <div class="pips"><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i><i class="g"></i></div>
+          <div class="cstat" style="color:#3fb950">✅ done · PR #112</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- lane: datacenter (teal) -->
+    <div style="flex:0 0 auto;background:#08191b;border:1px solid #1c3538;border-left:3px solid #39c5cf;border-radius:10px;padding:8px 9px">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:7px">
+        <span style="font-size:10.5px;font-weight:700;color:#39c5cf;background:#0f2e31;padding:2px 8px;border-radius:20px">skills-for-jira-datacenter</span>
+        <span style="font-size:10px;color:#6e7681">1</span>
+      </div>
+      <div style="display:flex;gap:8px">
+        <div class="card">
+          <div class="ctitle"><span class="dot" style="background:#3fb950"></span><span>main</span></div>
+          <div class="pips"><i class="g"></i><i></i><i></i><i></i><i></i></div>
+          <div class="cstat" style="color:#8b949e">🔎 perf scan</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- BIG CHAT -->
+  <div style="padding:16px 18px;min-height:330px;font-size:13.5px;line-height:1.55">
+    <div style="color:#8b949e;margin-bottom:4px">You</div>
+    <div style="margin-bottom:14px">Migrate candidate retrieval so a DISTILL_VERSION bump yields a clean corpus.</div>
+    <div style="color:#58a6ff;margin-bottom:4px">Agent · Opus 4.8</div>
+    <div style="margin-bottom:10px">Here's the plan. I'll <b>version-fence</b> retrieval so old candidates drop once the version bumps:</div>
+    <div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:14px;margin-bottom:12px">
+      <div style="font-size:10px;color:#6e7681;margin-bottom:10px">mermaid · rendered</div>
+      <svg viewBox="0 0 520 70" style="width:100%;max-width:520px">
+        <g font-family="ui-sans-serif" font-size="11" fill="#e6edf3">
+          <rect x="2" y="20" width="120" height="30" rx="6" fill="#1f2937" stroke="#3fb950"/><text x="62" y="39" text-anchor="middle">bump VERSION</text>
+          <rect x="160" y="20" width="130" height="30" rx="6" fill="#1f2937" stroke="#58a6ff"/><text x="225" y="39" text-anchor="middle">fence candidates</text>
+          <rect x="330" y="20" width="185" height="30" rx="6" fill="#1f2937" stroke="#58a6ff"/><text x="422" y="39" text-anchor="middle">retrieve where v == VERSION</text>
+          <line x1="122" y1="35" x2="158" y2="35" stroke="#6e7681" marker-end="url(#a)"/>
+          <line x1="290" y1="35" x2="328" y2="35" stroke="#6e7681" marker-end="url(#a)"/>
+        </g>
+        <defs><marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#6e7681"/></marker></defs>
+      </svg>
+    </div>
+    <div style="margin-bottom:10px">Edited <code>findingsService.ts</code> and <code>distill.ts</code>. Diff preview:</div>
+    <div style="width:230px;height:74px;border-radius:8px;border:1px solid #30363d;background:linear-gradient(135deg,#0b2e13,#161b22);display:flex;align-items:center;justify-content:center;font-size:11px;color:#8b949e;margin-bottom:14px">📷 diff-397.png (rendered inline)</div>
+    <div style="background:#161b22;border:1px solid #f0883e55;border-radius:8px;padding:12px;max-width:420px">
+      <div style="font-size:11px;color:#f0883e;margin-bottom:6px">⏸ wants to run</div>
+      <code style="display:block;background:#0d1117;padding:8px 10px;border-radius:6px">pnpm test:integration</code>
+      <div style="display:flex;gap:8px;margin-top:10px"><span style="background:#238636;color:#fff;padding:5px 14px;border-radius:6px;font-weight:600;font-size:12px">Approve ⏎</span><span style="background:#21262d;padding:5px 14px;border-radius:6px;font-size:12px">Deny</span></div>
+    </div>
+  </div>
+  <div style="padding:11px 16px;border-top:1px solid #30363d;display:flex;gap:8px">
+    <div style="flex:1;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:9px 12px;color:#6e7681;font-size:13px">Message this agent…</div>
+    <div style="background:#21262d;padding:9px 14px;border-radius:8px;font-size:12px">Send</div>
+  </div>
+</div>
+
+<p class="sub" style="margin-top:20px">Each project is now a bounded, color-headed lane (wikifix=blue, cloud=purple, datacenter=teal). Distinct enough, or push it further (e.g. hard dividers, collapsible lanes)?</p>
+</body></html>
