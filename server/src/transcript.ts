@@ -16,11 +16,20 @@ export interface ChatMsg {
   ts: number;
 }
 
+export interface SubagentInfo {
+  agentId: string;
+  description: string;
+  dispatchedAt: number;
+}
+
 export interface Transcript {
   type: 'transcript';
   sessionId: string;
   file: string;
   messages: ChatMsg[];
+  /** Subagents this session dispatched that haven't reported a terminal
+   *  status yet (no matching <task-notification> seen). */
+  activeSubagents: SubagentInfo[];
 }
 
 function textAndImages(content: unknown): { text: string; images: string[] } {
@@ -68,6 +77,12 @@ async function resolvePastedImages(text: string): Promise<{ text: string; images
   return { text: text.replace(PASTE_NOTE_RE, '').replace(/^\n+/, ''), images };
 }
 
+const TASK_ID_RE = /<task-id>(.+?)<\/task-id>/;
+
+function isSubagentDispatch(name: string): boolean {
+  return /task|agent/i.test(name);
+}
+
 function toolDetail(name: string, input: any): string {
   const n = name.toLowerCase();
   const base = (p: unknown) =>
@@ -87,6 +102,12 @@ export async function parseTranscript(file: string, sessionId: string, limit = 8
   const msgs: ChatMsg[] = [];
   let i = 0;
 
+  // Subagent bookkeeping: tool_use.id -> its dispatch, filled in with the
+  // agentId once the launch's tool_result reports it, then dropped from
+  // "active" once a matching <task-notification> reports a terminal status.
+  const dispatches = new Map<string, { description: string; ts: number; agentId?: string }>();
+  const finishedAgentIds = new Set<string>();
+
   // Read a point-in-time snapshot rather than streaming to EOF — the transcript
   // of a live session is appended to continuously, and a following stream would
   // never resolve while the agent is mid-response.
@@ -94,7 +115,7 @@ export async function parseTranscript(file: string, sessionId: string, limit = 8
   try {
     raw = await readFile(file, 'utf8');
   } catch {
-    return { type: 'transcript', sessionId, file, messages: [] };
+    return { type: 'transcript', sessionId, file, messages: [], activeSubagents: [] };
   }
 
   for (const line of raw.split('\n')) {
@@ -108,15 +129,25 @@ export async function parseTranscript(file: string, sessionId: string, limit = 8
     const ts = typeof o.timestamp === 'string' ? Date.parse(o.timestamp) : 0;
 
     if (o.type === 'user') {
-      // System-injected content rides in as "user" events but nothing the
-      // actual person typed — never render it as if they said it. Two
-      // distinct markers seen in the wild: isMeta (skill bodies, other
-      // injected context) and origin.kind (background task notifications).
+      if (o.origin?.kind === 'task-notification') {
+        const text = typeof o.message?.content === 'string' ? o.message.content : '';
+        const m = TASK_ID_RE.exec(text);
+        if (m) finishedAgentIds.add(m[1]);
+        continue; // synthetic — never render it as something the person said
+      }
+      // System-injected content also rides in as "user" events (isMeta) but
+      // nothing the actual person typed — never render it as if they said it.
       if (o.isMeta === true) continue;
-      if (o.origin?.kind === 'task-notification') continue;
       const content = o.message?.content;
-      // Tool results arrive as "user" events — don't render them as user turns.
-      if (Array.isArray(content) && content.some((c: any) => c?.type === 'tool_result')) continue;
+      const toolResult = Array.isArray(content) ? content.find((c: any) => c?.type === 'tool_result') : null;
+      if (toolResult) {
+        // A subagent dispatch's tool_result reports its agentId here (not
+        // nested in the content block) — that's how we find its own file.
+        const agentId = o.toolUseResult?.agentId;
+        const dispatch = agentId ? dispatches.get(toolResult.tool_use_id) : undefined;
+        if (dispatch) dispatch.agentId = agentId;
+        continue; // tool results arrive as "user" events — don't render them as user turns
+      }
       const { text: rawText, images: inlineImages } = textAndImages(content);
       if (!rawText.trim() && !inlineImages.length) continue;
       const { text, images: pastedImages } = await resolvePastedImages(rawText);
@@ -125,16 +156,28 @@ export async function parseTranscript(file: string, sessionId: string, limit = 8
     } else if (o.type === 'assistant') {
       const content = o.message?.content;
       const { text, images } = textAndImages(content);
-      const tools: ChatTool[] = Array.isArray(content)
-        ? content
-            .filter((c: any) => c?.type === 'tool_use')
-            .map((c: any) => ({ name: String(c.name ?? ''), detail: toolDetail(String(c.name ?? ''), c.input ?? {}) }))
-        : [];
+      const toolUses: any[] = Array.isArray(content) ? content.filter((c: any) => c?.type === 'tool_use') : [];
+      const tools: ChatTool[] = toolUses.map((c) => ({
+        name: String(c.name ?? ''),
+        detail: toolDetail(String(c.name ?? ''), c.input ?? {}),
+      }));
+      for (const c of toolUses) {
+        if (!c.id || !isSubagentDispatch(String(c.name ?? ''))) continue;
+        const description =
+          typeof c.input?.description === 'string' && c.input.description.trim()
+            ? c.input.description.trim()
+            : String(c.name ?? 'subagent');
+        dispatches.set(c.id, { description, ts });
+      }
       if (!text.trim() && !tools.length && !images.length) continue;
       msgs.push({ id: o.uuid ?? `a${i++}`, role: 'assistant', text, tools, images, ts });
     }
   }
 
+  const activeSubagents: SubagentInfo[] = [...dispatches.values()]
+    .filter((d): d is { description: string; ts: number; agentId: string } => !!d.agentId && !finishedAgentIds.has(d.agentId))
+    .map((d) => ({ agentId: d.agentId, description: d.description, dispatchedAt: d.ts }));
+
   // Return the full parsed list; the WebSocket layer decides the window to send.
-  return { type: 'transcript', sessionId, file, messages: msgs };
+  return { type: 'transcript', sessionId, file, messages: msgs, activeSubagents };
 }

@@ -50,11 +50,20 @@ function toolDetail(name: string, input: Record<string, unknown>): string {
   return '';
 }
 
+function isSubagentDispatch(name: string): boolean {
+  return /task|agent/i.test(name);
+}
+
 /** What a working agent is meaningfully doing right now: the tool's own
  *  description (active-voice, human) → a specific detail pulled from its
  *  inputs → a generic placeholder. Never the agent's last spoken sentence —
- *  that's what it already said, not what it's doing this instant. */
+ *  that's what it already said, not what it's doing this instant.
+ *
+ *  A subagent's own description is deliberately never shown here — active
+ *  subagents get their own chips near the bottom-of-chat indicator instead,
+ *  so the card just says the parent is waiting on them. */
 function workingStatus(name: string, input: Record<string, unknown>): string {
+  if (isSubagentDispatch(name)) return 'waiting on subagents…';
   const desc = typeof input.description === 'string' ? input.description.trim() : '';
   if (desc) return gist(desc, 200);
   return toolDetail(name, input) || 'thinking…';

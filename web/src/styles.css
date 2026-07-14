@@ -680,13 +680,18 @@ body {
 .working-indicator {
   flex: 0 0 auto;
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   padding: 6px 18px;
   font-size: 12.5px;
   color: #7ee787;
   background: #0d1712;
   border-top: 1px solid #1c3324;
+}
+.working-indicator__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .working-indicator__glyph {
   font-weight: 700;
@@ -697,6 +702,83 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.working-indicator__subagents {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.subagent-chip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: #a3d9ac;
+  cursor: pointer;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.subagent-chip:hover {
+  border-color: #3fb950;
+  color: #e6edf3;
+}
+.subagent-chip__glyph {
+  color: #3fb950;
+  font-weight: 700;
+  flex: 0 0 auto;
+}
+
+/* ---- subagent modal ---- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: #000000aa;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal {
+  width: min(820px, 92vw);
+  height: min(640px, 85vh);
+  background: #0b0f14;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 12px 40px #000000aa;
+}
+.modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #30363d;
+  color: #e6edf3;
+}
+.modal__close {
+  background: transparent;
+  border: none;
+  color: #8b949e;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 4px 8px;
+}
+.modal__close:hover {
+  color: #e6edf3;
+}
+.modal__body {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 /* ---- composer ---- */

@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import type { AgentModel, ChatMsg } from '../types';
+import type { AgentModel, ChatMsg, SubagentInfo } from '../types';
 import { CardStrip } from './CardStrip';
 import { ChatTranscript } from './ChatTranscript';
 import { Composer } from './Composer';
 import { WorkingIndicator } from './WorkingIndicator';
+import { SubagentModal } from './SubagentModal';
 
 export function FocusView({
   agents,
@@ -23,6 +24,10 @@ export function FocusView({
   sending,
   onCancel,
   onHide,
+  activeSubagents,
+  onSelectSubagent,
+  onCloseSubagent,
+  subagentModal,
 }: {
   agents: AgentModel[];
   focused: AgentModel;
@@ -41,6 +46,10 @@ export function FocusView({
   sending: boolean;
   onCancel: (sessionId: string) => void;
   onHide: (sessionId: string) => void;
+  activeSubagents: SubagentInfo[];
+  onSelectSubagent: (s: SubagentInfo) => void;
+  onCloseSubagent: () => void;
+  subagentModal: { agentId: string; description: string; messages: ChatMsg[] | null } | null;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
@@ -49,16 +58,14 @@ export function FocusView({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape' || editing) return;
-      if (sending) {
-        e.preventDefault();
-        onCancel(focused.sessionId);
-      } else {
-        onExit();
-      }
+      e.preventDefault();
+      if (subagentModal) onCloseSubagent();
+      else if (sending) onCancel(focused.sessionId);
+      else onExit();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onExit, onCancel, editing, sending, focused.sessionId]);
+  }, [onExit, onCancel, onCloseSubagent, editing, sending, subagentModal, focused.sessionId]);
 
   const lastUser = messages?.filter((m) => m.role === 'user').at(-1)?.text ?? null;
 
@@ -125,13 +132,23 @@ export function FocusView({
 
       <ChatTranscript key={focused.sessionId} messages={messages} hasMore={hasMore} onLoadMore={onLoadMore} />
 
-      {focused.state === 'working' && <WorkingIndicator status={focused.status} />}
+      {(focused.state === 'working' || activeSubagents.length > 0) && (
+        <WorkingIndicator
+          status={focused.state === 'working' ? focused.status : undefined}
+          subagents={activeSubagents}
+          onSelectSubagent={(s) => onSelectSubagent(s)}
+        />
+      )}
 
       <Composer
         lastUserMessage={lastUser}
         onSend={(text, images) => onSend(focused.sessionId, focused.cwd, text, images)}
         sending={sending}
       />
+
+      {subagentModal && (
+        <SubagentModal description={subagentModal.description} messages={subagentModal.messages} onClose={onCloseSubagent} />
+      )}
     </div>
   );
 }

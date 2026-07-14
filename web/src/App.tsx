@@ -19,8 +19,23 @@ function load<T>(key: string, fallback: T): T {
 }
 
 export function App() {
-  const { snap, connected, focusedId, messages, hasMore, focus, unfocus, loadMore, send, cancel, sendingIds } =
-    useShepherd();
+  const {
+    snap,
+    connected,
+    focusedId,
+    messages,
+    hasMore,
+    focus,
+    unfocus,
+    loadMore,
+    send,
+    cancel,
+    sendingIds,
+    activeSubagents,
+    openSubagent,
+    closeSubagent,
+    subagentModal,
+  } = useShepherd();
   const now = useTick(1000);
   const [windowH, setWindowH] = useState(4);
   const [fontSize, setFontSize] = useState<number>(() => load('shepherd:font', 14));
@@ -155,6 +170,10 @@ export function App() {
         sending={sendingIds.has(focused.sessionId)}
         onCancel={cancel}
         onHide={hide}
+        activeSubagents={activeSubagents}
+        onSelectSubagent={(s) => openSubagent(focused.file, focused.sessionId, s.agentId, s.description)}
+        onCloseSubagent={closeSubagent}
+        subagentModal={subagentModal}
       />
     );
   }

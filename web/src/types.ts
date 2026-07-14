@@ -52,9 +52,16 @@ export interface ChatMsg {
   pending?: boolean;
 }
 
+export interface SubagentInfo {
+  agentId: string;
+  description: string;
+  dispatchedAt: number;
+}
+
 export interface Transcript {
   type: 'transcript';
   sessionId: string;
   file: string;
   messages: ChatMsg[];
+  activeSubagents: SubagentInfo[];
 }

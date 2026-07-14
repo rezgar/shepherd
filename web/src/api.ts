@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ChatMsg, Snapshot } from './types';
+import type { ChatMsg, Snapshot, SubagentInfo } from './types';
 
 const WS_URL = 'ws://localhost:4177';
 
@@ -25,6 +25,12 @@ export interface Shepherd {
   cancel: (sessionId: string) => void;
   /** Sessions with an in-flight reply. */
   sendingIds: Set<string>;
+  /** Subagents the focused session dispatched that haven't finished yet. */
+  activeSubagents: SubagentInfo[];
+  openSubagent: (parentFile: string, sessionId: string, agentId: string, description: string) => void;
+  closeSubagent: () => void;
+  /** null while the modal is closed or its first window hasn't arrived yet. */
+  subagentModal: { agentId: string; description: string; messages: ChatMsg[] | null } | null;
 }
 
 interface PendingEcho {
@@ -67,11 +73,19 @@ export function useShepherd(): Shepherd {
   // never merged into `loaded` itself so there's no id to reconcile against the
   // real one.
   const [pending, setPending] = useState<Record<string, PendingEcho>>({});
+  const [activeSubagents, setActiveSubagents] = useState<SubagentInfo[]>([]);
+  const [subagentModal, setSubagentModal] = useState<{
+    agentId: string;
+    description: string;
+    messages: ChatMsg[] | null;
+  } | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const focusRef = useRef<{ file: string; sessionId: string } | null>(null);
   const loadedRef = useRef<Loaded | null>(null);
   loadedRef.current = loaded;
+  const subagentModalRef = useRef(subagentModal);
+  subagentModalRef.current = subagentModal;
   // Cache the loaded window per session so re-focusing is instant.
   const cache = useRef<Map<string, Loaded>>(new Map());
 
@@ -97,6 +111,7 @@ export function useShepherd(): Shepherd {
           setSnap(d as Snapshot);
         } else if (d.type === 'transcript') {
           if (d.sessionId !== focusRef.current?.sessionId) return;
+          setActiveSubagents(Array.isArray(d.activeSubagents) ? d.activeSubagents : []);
           let merged: Loaded | null = null;
           setLoaded((prev) => {
             const next = mergeTail(prev, d.sessionId, d.messages, d.offset, d.total);
@@ -128,6 +143,9 @@ export function useShepherd(): Shepherd {
             cache.current.set(d.sessionId, next);
             return next;
           });
+        } else if (d.type === 'subagentTranscript') {
+          if (d.agentId !== subagentModalRef.current?.agentId) return;
+          setSubagentModal((prev) => (prev && prev.agentId === d.agentId ? { ...prev, messages: d.messages } : prev));
         } else if (d.type === 'send-done' || d.type === 'send-error' || d.type === 'send-cancelled') {
           setSendingIds((s) => {
             if (!s.has(d.sessionId)) return s;
@@ -162,14 +180,30 @@ export function useShepherd(): Shepherd {
     focusRef.current = { file, sessionId };
     setFocusedId(sessionId);
     setLoaded(cache.current.get(sessionId) ?? null); // instant paint from cache, else clears
+    setActiveSubagents([]);
+    setSubagentModal(null);
     wsRef.current?.send(JSON.stringify({ type: 'focus', file, sessionId }));
+    wsRef.current?.send(JSON.stringify({ type: 'unfocusSubagent' }));
   }, []);
 
   const unfocus = useCallback(() => {
     focusRef.current = null;
     setFocusedId(null);
     setLoaded(null);
+    setActiveSubagents([]);
+    setSubagentModal(null);
     wsRef.current?.send(JSON.stringify({ type: 'unfocus' }));
+    wsRef.current?.send(JSON.stringify({ type: 'unfocusSubagent' }));
+  }, []);
+
+  const openSubagent = useCallback((parentFile: string, sessionId: string, agentId: string, description: string) => {
+    setSubagentModal({ agentId, description, messages: null });
+    wsRef.current?.send(JSON.stringify({ type: 'focusSubagent', parentFile, sessionId, agentId }));
+  }, []);
+
+  const closeSubagent = useCallback(() => {
+    setSubagentModal(null);
+    wsRef.current?.send(JSON.stringify({ type: 'unfocusSubagent' }));
   }, []);
 
   const loadMore = useCallback(() => {
@@ -227,6 +261,10 @@ export function useShepherd(): Shepherd {
     send,
     cancel,
     sendingIds,
+    activeSubagents,
+    openSubagent,
+    closeSubagent,
+    subagentModal,
   };
 }
 
