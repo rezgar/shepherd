@@ -1,4 +1,4 @@
-import type { Stage } from '../types';
+import type { AgentModel, Stage } from '../types';
 
 const PALETTE = ['#58a6ff', '#bc8cff', '#39c5cf', '#e3b341', '#f0883e', '#56d364', '#ff7b72', '#79c0ff'];
 
@@ -15,6 +15,22 @@ export const STAGE_LABELS = ['Def', 'Plan', 'Impl', 'Test', 'Debug'];
 /** Index of the current stage in the pipeline, or -1 for unknown. */
 export function stageIndex(stage: Stage): number {
   return STAGES.indexOf(stage);
+}
+
+/** Group agents by product in a single stable reading order — products by
+ *  earliest session creation, sessions within a product by their own creation
+ *  time. Shared by the canvas lanes, the focus-mode top strip, and the
+ *  Alt+N quick-switch so all three always agree on "the Nth session". */
+export function groupByProduct(agents: AgentModel[]): [string, AgentModel[]][] {
+  const map = new Map<string, AgentModel[]>();
+  for (const a of agents) {
+    const arr = map.get(a.product) ?? [];
+    arr.push(a);
+    map.set(a.product, arr);
+  }
+  return [...map.entries()]
+    .map(([product, ags]): [string, AgentModel[]] => [product, [...ags].sort((a, b) => a.createdAt - b.createdAt)])
+    .sort((a, b) => a[1][0].createdAt - b[1][0].createdAt);
 }
 
 export function humAgo(ms: number): string {

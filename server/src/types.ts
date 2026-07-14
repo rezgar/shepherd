@@ -1,4 +1,4 @@
-export type AgentState = 'working' | 'needs-you' | 'idle';
+export type AgentState = 'working' | 'needs-you' | 'idle' | 'error';
 
 export type Stage =
   | 'definition'
@@ -29,8 +29,10 @@ export interface AgentModel {
   name: string;
   state: AgentState;
   stage: Stage;
-  /** One-line human status. */
+  /** High-level card status while working — the current task, one altitude below `stage`. */
   status: string;
+  /** Granular "doing this instant" detail — shown in the focus-view ✽ indicator. */
+  activity: string;
   /** If needs-you, what kind of action. */
   action: ActionKind | null;
   /** Epoch ms of last activity. */

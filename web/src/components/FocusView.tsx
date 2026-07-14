@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react';
-import type { AgentModel, ChatMsg } from '../types';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { AgentModel, ChatMsg, SubagentInfo } from '../types';
 import { CardStrip } from './CardStrip';
 import { ChatTranscript } from './ChatTranscript';
-import { Composer } from './Composer';
+import { Composer, type ComposerDraft } from './Composer';
+import { WorkingIndicator } from './WorkingIndicator';
+import { SubagentModal } from './SubagentModal';
 
 export function FocusView({
   agents,
@@ -18,6 +20,14 @@ export function FocusView({
   onRename,
   fontSize,
   onFontSize,
+  onSend,
+  sending,
+  onCancel,
+  onHide,
+  activeSubagents,
+  onSelectSubagent,
+  onCloseSubagent,
+  subagentModal,
 }: {
   agents: AgentModel[];
   focused: AgentModel;
@@ -32,18 +42,41 @@ export function FocusView({
   onRename: (sessionId: string, name: string) => void;
   fontSize: number;
   onFontSize: (delta: number) => void;
+  onSend: (sessionId: string, cwd: string, text: string, images?: string[]) => void;
+  sending: boolean;
+  onCancel: (sessionId: string) => void;
+  onHide: (sessionId: string) => void;
+  activeSubagents: SubagentInfo[];
+  onSelectSubagent: (s: SubagentInfo) => void;
+  onCloseSubagent: () => void;
+  subagentModal: { agentId: string; description: string; messages: ChatMsg[] | null } | null;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const name = nameOf(focused);
 
+  // Per-session composer drafts, kept across session switches (the Composer is
+  // keyed by sessionId, so it remounts on switch and reads its session's draft).
+  const composerDrafts = useRef<Map<string, ComposerDraft>>(new Map());
+  const saveDraft = useCallback(
+    (d: ComposerDraft) => {
+      if (d.text || d.images.length) composerDrafts.current.set(focused.sessionId, d);
+      else composerDrafts.current.delete(focused.sessionId);
+    },
+    [focused.sessionId],
+  );
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !editing) onExit();
+      if (e.key !== 'Escape' || editing) return;
+      e.preventDefault();
+      if (subagentModal) onCloseSubagent();
+      else if (sending) onCancel(focused.sessionId);
+      else onExit();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onExit, editing]);
+  }, [onExit, onCancel, onCloseSubagent, editing, sending, subagentModal, focused.sessionId]);
 
   const lastUser = messages?.filter((m) => m.role === 'user').at(-1)?.text ?? null;
 
@@ -94,7 +127,7 @@ export function FocusView({
             <button onClick={() => onFontSize(-1)}>A−</button>
             <button onClick={() => onFontSize(1)}>A+</button>
           </span>
-          <span className="focus__hint">Esc = canvas</span>
+          <span className="focus__hint">{sending ? 'Esc = stop' : 'Esc = canvas'}</span>
         </span>
       </div>
 
@@ -105,11 +138,38 @@ export function FocusView({
         colorOf={colorOf}
         onSelect={onSelect}
         nameOf={nameOf}
+        onHide={onHide}
       />
 
-      <ChatTranscript key={focused.sessionId} messages={messages} hasMore={hasMore} onLoadMore={onLoadMore} />
+      <ChatTranscript
+        key={`chat-${focused.sessionId}`}
+        messages={messages}
+        hasMore={hasMore}
+        onLoadMore={onLoadMore}
+        onAnswer={(text) => onSend(focused.sessionId, focused.cwd, text)}
+      />
 
-      <Composer lastUserMessage={lastUser} />
+      {(focused.state === 'working' || activeSubagents.length > 0) && (
+        <WorkingIndicator
+          status={focused.state === 'working' ? focused.activity || focused.status : undefined}
+          subagents={activeSubagents}
+          onSelectSubagent={(s) => onSelectSubagent(s)}
+        />
+      )}
+
+      <Composer
+        key={`composer-${focused.sessionId}`}
+        initialDraft={composerDrafts.current.get(focused.sessionId)}
+        onDraftChange={saveDraft}
+        lastUserMessage={lastUser}
+        onSend={(text, images) => onSend(focused.sessionId, focused.cwd, text, images)}
+        sending={sending}
+        onCancel={() => onCancel(focused.sessionId)}
+      />
+
+      {subagentModal && (
+        <SubagentModal description={subagentModal.description} messages={subagentModal.messages} onClose={onCloseSubagent} />
+      )}
     </div>
   );
 }

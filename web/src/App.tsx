@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useShepherd, useTick } from './api';
 import { ProjectLane } from './components/ProjectLane';
 import { FocusView } from './components/FocusView';
-import type { AgentModel } from './types';
+import { groupByProduct } from './lib/format';
+import { playDone, playError, playNeedsYou, unlockAudio } from './lib/sound';
+import type { AgentModel, AgentState } from './types';
 
 const PALETTE = ['#58a6ff', '#bc8cff', '#39c5cf', '#e3b341', '#f0883e', '#56d364', '#ff7b72', '#79c0ff'];
 const WINDOWS = [1, 4, 12, 24];
@@ -16,25 +18,31 @@ function load<T>(key: string, fallback: T): T {
   }
 }
 
-function groupByProduct(agents: AgentModel[]): [string, AgentModel[]][] {
-  const map = new Map<string, AgentModel[]>();
-  for (const a of agents) {
-    const arr = map.get(a.product) ?? [];
-    arr.push(a);
-    map.set(a.product, arr);
-  }
-  // Stable order by each product's earliest session creation — never reorder on activity.
-  return [...map.entries()].sort(
-    (a, b) => Math.min(...a[1].map((x) => x.createdAt)) - Math.min(...b[1].map((x) => x.createdAt)),
-  );
-}
-
 export function App() {
-  const { snap, connected, focusedId, messages, hasMore, focus, unfocus, loadMore } = useShepherd();
+  const {
+    snap,
+    connected,
+    focusedId,
+    messages,
+    hasMore,
+    focus,
+    unfocus,
+    loadMore,
+    send,
+    cancel,
+    sendingIds,
+    activeSubagents,
+    openSubagent,
+    closeSubagent,
+    subagentModal,
+  } = useShepherd();
   const now = useTick(1000);
   const [windowH, setWindowH] = useState(4);
   const [fontSize, setFontSize] = useState<number>(() => load('shepherd:font', 14));
   const [renames, setRenames] = useState<Record<string, string>>(() => load('shepherd:names', {}));
+  const [hidden, setHidden] = useState<Record<string, true>>(() => load('shepherd:hidden', {}));
+  const [showHidden, setShowHidden] = useState(false);
+  const [muted, setMuted] = useState<boolean>(() => load('shepherd:muted', false));
 
   useEffect(() => {
     localStorage.setItem('shepherd:font', JSON.stringify(fontSize));
@@ -42,6 +50,47 @@ export function App() {
   useEffect(() => {
     localStorage.setItem('shepherd:names', JSON.stringify(renames));
   }, [renames]);
+  useEffect(() => {
+    localStorage.setItem('shepherd:hidden', JSON.stringify(hidden));
+  }, [hidden]);
+  useEffect(() => {
+    localStorage.setItem('shepherd:muted', JSON.stringify(muted));
+  }, [muted]);
+
+  // Browsers suspend audio until a user gesture — warm it up on the first one.
+  useEffect(() => {
+    const onFirstInteraction = () => {
+      unlockAudio();
+      window.removeEventListener('pointerdown', onFirstInteraction);
+      window.removeEventListener('keydown', onFirstInteraction);
+    };
+    window.addEventListener('pointerdown', onFirstInteraction);
+    window.addEventListener('keydown', onFirstInteraction);
+    return () => {
+      window.removeEventListener('pointerdown', onFirstInteraction);
+      window.removeEventListener('keydown', onFirstInteraction);
+    };
+  }, []);
+
+  // Ding on state transitions: done (working → idle), needs-you (anything →
+  // needs-you), error (anything → error). Never on the first snapshot seen
+  // for a session — that would ding for states that already existed before
+  // Shepherd connected/reconnected, not a fresh transition.
+  const prevStates = useRef<Map<string, AgentState>>(new Map());
+  const mutedRef = useRef(muted);
+  mutedRef.current = muted;
+  useEffect(() => {
+    if (!snap) return;
+    const prev = prevStates.current;
+    for (const a of snap.agents) {
+      const was = prev.get(a.sessionId);
+      prev.set(a.sessionId, a.state);
+      if (was === undefined || was === a.state || mutedRef.current) continue;
+      if (a.state === 'error') playError();
+      else if (a.state === 'needs-you') playNeedsYou();
+      else if (a.state === 'idle' && was === 'working') playDone();
+    }
+  }, [snap]);
 
   const colorMap = useMemo(() => {
     const names = snap ? [...new Set(snap.agents.map((a) => a.product))].sort() : [];
@@ -59,6 +108,37 @@ export function App() {
       return next;
     });
   const changeFont = (delta: number) => setFontSize((f) => Math.max(12, Math.min(22, f + delta)));
+  const hide = (sessionId: string) =>
+    setHidden((h) => ({ ...h, [sessionId]: true }));
+  const restore = (sessionId: string) =>
+    setHidden((h) => {
+      const next = { ...h };
+      delete next[sessionId];
+      return next;
+    });
+
+  const latest = snap ? snap.agents.reduce((mx, a) => Math.max(mx, a.lastActivity), 0) : 0;
+  const cutoff = latest - windowH * 3_600_000;
+  const allVisible = snap ? snap.agents.filter((a) => a.lastActivity >= cutoff) : [];
+  const shownVisible = allVisible.filter((a) => !hidden[a.sessionId]);
+  const hiddenVisible = allVisible.filter((a) => hidden[a.sessionId]);
+  const groups = groupByProduct(shownVisible);
+  // Same shared order the top strip and canvas lanes render in — Alt+N jumps to the Nth card.
+  const flatOrder = groups.flatMap(([, ags]) => ags);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.altKey) return;
+      const n = Number(e.key);
+      if (n < 1 || n > 9) return;
+      const target = flatOrder[n - 1];
+      if (!target) return;
+      e.preventDefault();
+      focus(target.file, target.sessionId);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [flatOrder, focus]);
 
   if (!snap) {
     return (
@@ -68,16 +148,12 @@ export function App() {
     );
   }
 
-  const latest = snap.agents.reduce((mx, a) => Math.max(mx, a.lastActivity), 0);
-  const cutoff = latest - windowH * 3_600_000;
-  const visible = snap.agents.filter((a) => a.lastActivity >= cutoff);
-
   const focused = focusedId ? (snap.agents.find((a) => a.sessionId === focusedId) ?? null) : null;
 
   if (focused) {
     return (
       <FocusView
-        agents={visible}
+        agents={shownVisible}
         focused={focused}
         messages={messages}
         hasMore={hasMore}
@@ -90,24 +166,38 @@ export function App() {
         onRename={rename}
         fontSize={fontSize}
         onFontSize={changeFont}
+        onSend={send}
+        sending={sendingIds.has(focused.sessionId)}
+        onCancel={cancel}
+        onHide={hide}
+        activeSubagents={activeSubagents}
+        onSelectSubagent={(s) => openSubagent(focused.file, focused.sessionId, s.agentId, s.description)}
+        onCloseSubagent={closeSubagent}
+        subagentModal={subagentModal}
       />
     );
   }
 
-  const needsYou = visible.filter((a) => a.state === 'needs-you').length;
-  const working = visible.filter((a) => a.state === 'working').length;
-  const groups = groupByProduct(visible);
+  const needsYou = shownVisible.filter((a) => a.state === 'needs-you').length;
+  const working = shownVisible.filter((a) => a.state === 'working').length;
+  const errored = shownVisible.filter((a) => a.state === 'error').length;
 
   return (
     <div className="shell">
       <header className="topbar">
         <span className="brand">🐑 Agent Shepherd</span>
         <span className="counts">
-          {visible.length} agents · <b className="c-work">{working} working</b>
+          {shownVisible.length} agents · <b className="c-work">{working} working</b>
           {needsYou > 0 && (
             <>
               {' · '}
               <b className="c-need">{needsYou} need you</b>
+            </>
+          )}
+          {errored > 0 && (
+            <>
+              {' · '}
+              <b className="c-error">{errored} errored</b>
             </>
           )}
         </span>
@@ -121,6 +211,14 @@ export function App() {
             ))}
           </select>
         </label>
+        <button className="mute-toggle" onClick={() => setMuted((m) => !m)} title={muted ? 'Unmute sounds' : 'Mute sounds'}>
+          {muted ? '🔕' : '🔔'}
+        </button>
+        {hiddenVisible.length > 0 && (
+          <button className="hidden-toggle" onClick={() => setShowHidden((s) => !s)}>
+            {hiddenVisible.length} hidden {showHidden ? '▴' : '▾'}
+          </button>
+        )}
         <span className={`conn ${connected ? 'on' : 'off'}`}>{connected ? 'live' : 'reconnecting…'}</span>
       </header>
 
@@ -134,8 +232,26 @@ export function App() {
             color={colorOf(product)}
             onSelect={(a) => focus(a.file, a.sessionId)}
             nameOf={nameOf}
+            onHide={hide}
           />
         ))}
+
+        {showHidden && hiddenVisible.length > 0 && (
+          <div className="hidden-tray">
+            <div className="hidden-tray__title">Hidden — click to restore</div>
+            <div className="hidden-tray__list">
+              {hiddenVisible.map((a) => (
+                <button key={a.sessionId} className="hidden-chip" onClick={() => restore(a.sessionId)}>
+                  <span className="hidden-chip__dot" style={{ background: colorOf(a.product) }} />
+                  <span className="hidden-chip__name" title={nameOf(a)}>
+                    {nameOf(a)}
+                  </span>
+                  <span className="hidden-chip__restore">↺ restore</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );

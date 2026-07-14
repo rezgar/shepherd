@@ -50,18 +50,65 @@ function toolDetail(name: string, input: Record<string, unknown>): string {
   return '';
 }
 
-/** What a working agent is meaningfully doing now: the tool's own description
- *  (active-voice, human) → the agent's latest narration → a specific tool detail. */
-function workingStatus(name: string, input: Record<string, unknown>, narration: string): string {
+function isSubagentDispatch(name: string): boolean {
+  return /task|agent/i.test(name);
+}
+
+const CONTINUATION_WORDS = new Set([
+  'ok', 'okay', 'k', 'yes', 'yep', 'yeah', 'yup', 'sure', 'go', 'go on', 'go ahead', 'next',
+  'continue', 'resume', 'proceed', 'do it', 'please', 'thanks', 'thank you', 'ty', 'y', 'n', 'no',
+  'done', 'good', 'nice', 'cool', 'merge', 'merge it', 'ship it',
+]);
+
+/** Is this user message a real instruction (worth showing as the card's high-
+ *  level task) rather than a terse steer like "ok" / "continue" / "resume" that
+ *  shouldn't overwrite the goal — or a system-injected user turn (a compaction
+ *  summary, a slash-command caveat) that isn't the user talking at all. */
+function isTaskLike(text: string): boolean {
+  const t = text.trim();
+  if (t.length < 12) return false;
+  const bare = t.toLowerCase().replace(/[^a-z ]/g, '').replace(/\s+/g, ' ').trim();
+  if (CONTINUATION_WORDS.has(bare)) return false;
+  if (/^this session is being continued/i.test(t)) return false;
+  if (/^<(local-command|command-)/i.test(t)) return false;
+  return true;
+}
+
+/** What a working agent is meaningfully doing right now: the tool's own
+ *  description (active-voice, human) → a specific detail pulled from its
+ *  inputs → a generic placeholder. Never the agent's last spoken sentence —
+ *  that's what it already said, not what it's doing this instant.
+ *
+ *  A subagent's own description is deliberately never shown here — active
+ *  subagents get their own chips near the bottom-of-chat indicator instead,
+ *  so the card just says the parent is waiting on them. */
+function workingStatus(name: string, input: Record<string, unknown>): string {
+  if (isSubagentDispatch(name)) return 'waiting on subagents…';
   const desc = typeof input.description === 'string' ? input.description.trim() : '';
   if (desc) return gist(desc, 200);
-  if (narration) return gist(narration, 200);
-  return toolDetail(name, input) || 'working…';
+  return toolDetail(name, input) || 'thinking…';
 }
 
 /** The stage is whatever the agent was most recently doing. */
 function pickStage(signals: Stage[]): Stage {
   return signals.at(-1) ?? 'unknown';
+}
+
+const ERROR_LABELS: Record<string, string> = {
+  rate_limit: 'hit a rate limit',
+  overloaded: 'API overloaded',
+  server_error: 'API server error',
+  billing_error: 'billing issue',
+  max_output_tokens: 'hit max output length',
+  authentication_failed: 'authentication failed',
+  oauth_org_not_allowed: 'OAuth org not allowed',
+  invalid_request: 'invalid request',
+  model_not_found: 'model not found',
+};
+
+function errorStatus(errorType: string | null): string {
+  if (!errorType) return 'session stopped on an error';
+  return ERROR_LABELS[errorType] ?? `error: ${errorType}`;
 }
 
 /**
@@ -87,6 +134,7 @@ export async function parseSession(
   let lastToolName = '';
   let lastToolInput: Record<string, unknown> = {};
   let lastUserText = '';
+  let lastTaskText = '';
   let lastEventKind = '';
   const stageSignals: Stage[] = [];
 
@@ -140,6 +188,7 @@ export async function parseSession(
           lastEventKind = 'tool_result';
         } else if (txt.trim()) {
           lastUserText = txt.trim();
+          if (isTaskLike(txt)) lastTaskText = txt.trim();
           lastEventKind = 'user';
         }
         const low = txt.toLowerCase();
@@ -190,20 +239,34 @@ export async function parseSession(
   let state: AgentState;
   let action: ActionKind | null = null;
   let status: string;
+  // Granular "what it's doing this instant" — surfaced in the focus view's ✽
+  // indicator. The card's `status` stays at the higher task altitude while
+  // working; `activity` carries the momentary detail so no granularity is lost.
+  let activity = '';
 
   const activelyRunning = idleMs < ACTIVE_WINDOW_MS;
   const finishedTurn = lastEventKind === 'assistant' && lastAssistantStop !== 'tool_use';
   const wantsTool = lastEventKind === 'assistant' && lastAssistantStop === 'tool_use';
   const endsWithQuestion = /\?["')\]]*\s*$/.test(lastAssistantText);
 
-  if (hook?.state === 'working') {
+  // The card's status while working: the task you gave it (the last substantive
+  // instruction), gisted — one altitude below `stage`. Falls back to narration
+  // then a placeholder. Granular tool activity goes to `activity` instead.
+  const taskStatus = gist(lastTaskText || lastUserText, 200) || gist(lastAssistantText, 200) || 'working…';
+
+  if (hook?.state === 'error') {
+    // exact: StopFailure fired — the session terminated on a rate limit / API / billing error
+    state = 'error';
+    status = errorStatus(hook.errorType);
+  } else if (hook?.state === 'working') {
     // exact: Claude Code told us it's running (incl. while subagents work)
     state = 'working';
-    status = lastToolName
-      ? workingStatus(lastToolName, lastToolInput, lastAssistantText)
+    activity = lastToolName
+      ? workingStatus(lastToolName, lastToolInput)
       : hook.tool
         ? `running ${hook.tool}`
-        : gist(lastAssistantText, 200) || 'working…';
+        : gist(lastAssistantText, 200) || 'thinking…';
+    status = taskStatus;
   } else if (hook?.state === 'needs-you') {
     // exact: a Notification fired — it wants your attention
     state = 'needs-you';
@@ -241,13 +304,16 @@ export async function parseSession(
     // executing a tool (including a subagent) in an auto-approving mode — the
     // session is still running even if it hasn't written for a while.
     state = 'working';
-    status = workingStatus(lastToolName, lastToolInput, lastAssistantText);
+    activity = workingStatus(lastToolName, lastToolInput);
+    status = taskStatus;
   } else if (activelyRunning && lastEventKind !== 'user') {
     state = 'working';
-    status = workingStatus(lastToolName, lastToolInput, lastAssistantText);
+    activity = workingStatus(lastToolName, lastToolInput);
+    status = taskStatus;
   } else if (activelyRunning && lastEventKind === 'user') {
     state = 'working';
-    status = 'thinking…';
+    activity = 'thinking…';
+    status = taskStatus;
   } else {
     state = 'idle';
     status = gist(lastAssistantText, 200) || gist(lastUserText, 200) || 'idle';
@@ -265,6 +331,7 @@ export async function parseSession(
     state,
     stage,
     status,
+    activity,
     action,
     lastActivity: lastTs,
     createdAt: firstTs || lastTs,

@@ -1,5 +1,5 @@
 // Mirror of the server wire types (@shepherd/server/src/types.ts).
-export type AgentState = 'working' | 'needs-you' | 'idle';
+export type AgentState = 'working' | 'needs-you' | 'idle' | 'error';
 
 export type Stage =
   | 'definition'
@@ -22,7 +22,10 @@ export interface AgentModel {
   name: string;
   state: AgentState;
   stage: Stage;
+  /** High-level card status while working (the current task). */
   status: string;
+  /** Granular "doing this instant" detail — focus-view ✽ indicator. */
+  activity: string;
   action: ActionKind | null;
   lastActivity: number;
   createdAt: number;
@@ -36,9 +39,23 @@ export interface Snapshot {
   agents: AgentModel[];
 }
 
+export interface AskOption {
+  label: string;
+  description?: string;
+}
+
+export interface AskQuestion {
+  header?: string;
+  question: string;
+  multiSelect?: boolean;
+  options: AskOption[];
+}
+
 export interface ChatTool {
   name: string;
   detail: string;
+  /** Set only for AskUserQuestion — rendered as a question card, not a chip. */
+  questions?: AskQuestion[];
 }
 
 export interface ChatMsg {
@@ -48,6 +65,14 @@ export interface ChatMsg {
   tools: ChatTool[];
   images: string[];
   ts: number;
+  /** Optimistic local echo, not yet confirmed written by the real transcript. */
+  pending?: boolean;
+}
+
+export interface SubagentInfo {
+  agentId: string;
+  description: string;
+  dispatchedAt: number;
 }
 
 export interface Transcript {
@@ -55,4 +80,5 @@ export interface Transcript {
   sessionId: string;
   file: string;
   messages: ChatMsg[];
+  activeSubagents: SubagentInfo[];
 }
