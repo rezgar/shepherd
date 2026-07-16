@@ -1038,14 +1038,16 @@ Replace the `<FocusView ... />` call (lines 176-207):
 
 - [ ] **Step 3: Delete the dead components**
 
+**Correction found during execution**: `ChatTranscript.tsx` and `QuestionCard.tsx` are NOT dead — `SubagentModal.tsx` (the read-only viewer for a dispatched subagent's own transcript, a genuinely different feature from the main interactive view — subagents have no live PTY of their own to attach a terminal to) renders `<ChatTranscript ... answerable={false} />`, which itself imports `QuestionCard` to render a subagent's own (read-only) `AskUserQuestion` calls. Only delete the three components with no other consumer:
+
 ```bash
-git rm web/src/components/ChatTranscript.tsx web/src/components/Composer.tsx web/src/components/WorkingIndicator.tsx web/src/components/QueuedMessage.tsx web/src/components/QuestionCard.tsx
+git rm web/src/components/Composer.tsx web/src/components/WorkingIndicator.tsx web/src/components/QueuedMessage.tsx
 ```
 
 - [ ] **Step 4: Typecheck**
 
 Run: `cd web && npx tsc --noEmit`
-Expected: PASS, 0 errors. If `tsc` flags `ToolRow.tsx` or `Mermaid.tsx` as now-orphaned (only ever imported by the deleted `ChatTranscript.tsx`), check `SubagentModal.tsx`'s imports first — it may still render markdown through `Mermaid.tsx` for the read-only subagent view, in which case keep it; delete `ToolRow.tsx` only if nothing still imports it.
+Expected: PASS, 0 errors.
 
 - [ ] **Step 5: Commit**
 
