@@ -441,20 +441,23 @@ git commit -m "feat: add attachTerm/detachTerm/termInput/termResize WS protocol"
 ## Task 3: Delete the now-dead send/queue machinery
 
 **Files:**
-- Modify: `server/src/sender.ts` (delete `sendToSession`, `waitForTurnToFinish`, `didMessageLand`, `countLines`)
+- Modify: `server/src/sender.ts` (delete `sendToSession`, `didMessageLand`, `countLines`)
 - Modify: `server/test/sender.test.ts` (delete their tests)
+
+**Correction found during execution**: `waitForTurnToFinish` is NOT dead — `spawnSession` (the "+ new session" kickoff, explicitly kept per Task 2) also calls it, to confirm a brand-new session's kickoff was actually processed before there's any live stream to attach to and watch directly. Only `sendToSession`'s reply path is being replaced by live-stream watching; the new-session bootstrap path still needs it. Keep `waitForTurnToFinish` (and the `POLL_MS`/`START_TIMEOUT_MS` constants it uses).
 
 - [ ] **Step 1: Delete the dead functions from `sender.ts`**
 
-Delete these four blocks entirely (verify current line numbers with `grep -n "^async function waitForTurnToFinish\|^export async function countLines\|^export async function didMessageLand\|^export function sendToSession" server/src/sender.ts` before deleting, since Task 1/2's edits shift line numbers):
-- `waitForTurnToFinish` (the whole function, including its long comment block)
+Delete these blocks entirely (verify current line numbers with `grep -n "^export async function countLines\|^export async function didMessageLand\|^export function sendToSession" server/src/sender.ts` before deleting, since Task 1/2's edits shift line numbers):
 - `countLines`
 - `didMessageLand`
 - `sendToSession` (the whole function, including its `SendHandle` usage — but keep the `SendHandle` interface itself, since `spawnSession` still uses it)
 
+Leave `waitForTurnToFinish` in place (see correction above).
+
 - [ ] **Step 2: Remove their tests from `server/test/sender.test.ts`**
 
-Delete the `describe`/`it` blocks that test `countLines` and `didMessageLand`, and remove those two names from the import line at the top of the file (keep `RingBuffer` from Task 1).
+Delete the `describe`/`it` blocks that test `countLines` and `didMessageLand`, and the now-unused fixture helpers (`write`/`append`/`userLine`/`assistantLine`/`dir`/`afterAll`) that only those tests used. Remove `countLines`/`didMessageLand` from the import line at the top of the file (keep `AsyncLock`/`RingBuffer`).
 
 - [ ] **Step 3: Typecheck and run tests**
 

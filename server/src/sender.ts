@@ -438,6 +438,12 @@ async function gracefulClose(p: IPty): Promise<void> {
  *  Ground truth lives in the transcript either way; this just reads it
  *  instead of re-deriving it.
  *
+ *  Only `spawnSession`'s new-session kickoff still uses this — the reply
+ *  path (`writeTermInput`) no longer needs to confirm completion at all,
+ *  since the caller is watching the live terminal stream directly. A brand
+ *  new session has no live stream to watch until its session id is known,
+ *  so this is still how the kickoff's own success gets confirmed.
+ *
  *  Returns `'timeout'` — distinct from `'done'` — if it never once saw the
  *  turn start: under enough concurrent load a `--resume` can take well over
  *  a minute just to reach its input prompt (confirmed the hard way — 65s+
@@ -454,9 +460,7 @@ async function gracefulClose(p: IPty): Promise<void> {
  *  `SessionStart:resume` hook asynchronously, and output can go quiet while
  *  that hook is still gating real input — the quiet-window "ready" signal
  *  fires, Shepherd types into it, and the keystrokes land on a prompt that
- *  isn't actually listening yet, silently swallowed with no error (the
- *  session's own transcript showed a real turn starting seconds after a
- *  first attempt like this went completely unacknowledged). Gated on
+ *  isn't actually listening yet, silently swallowed with no error. Gated on
  *  `!sawWorking` so it can only ever fire on a session with zero evidence
  *  the first attempt was ever read — the same safety condition
  *  `findNewSessionFile`'s retry already relies on. */
@@ -495,185 +499,6 @@ async function waitForTurnToFinish(
     }
     if (now > startDeadline) return 'timeout'; // never saw it start — don't hang forever
   }
-}
-
-/** Total non-empty line count — a before/after anchor for `didMessageLand`,
- *  which does the `type: 'user'` filtering once it has the new-lines slice. */
-export async function countLines(file: string): Promise<number> {
-  try {
-    const raw = await readFileAsync(file, 'utf8');
-    return raw.split('\n').filter((l) => l.trim()).length;
-  } catch {
-    return 0;
-  }
-}
-
-/** After a send appears to "finish" per aggregate transcript state, confirm
- *  OUR specific message actually became a real turn — not just that the
- *  session cycled working→idle, which a session with another live writer
- *  can satisfy via its OWN unrelated activity while our `--resume` silently
- *  never got read at all (confirmed possible: two `--resume` processes on
- *  one session don't reliably both get to submit input; the other one's
- *  ordinary work still trips the same "it finished" heuristic, producing a
- *  false success — Shepherd says sent, nothing was ever actually
- *  processed). Scoped to only lines written after `linesBefore` so a match
- *  can't come from something the OTHER process said earlier or later. */
-export async function didMessageLand(file: string, sentText: string, linesBefore: number): Promise<boolean> {
-  const needle = sentText.trim().slice(0, 80);
-  if (!needle) return true; // nothing text-based to confirm (shouldn't happen — callers always send some text)
-  let raw: string;
-  try {
-    raw = await readFileAsync(file, 'utf8');
-  } catch {
-    return false;
-  }
-  const lines = raw.split('\n').filter((l) => l.trim());
-  for (const line of lines.slice(linesBefore)) {
-    let o: any;
-    try {
-      o = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (o.type !== 'user') continue;
-    const content = o.message?.content;
-    const text =
-      typeof content === 'string'
-        ? content
-        : Array.isArray(content)
-          ? content.map((c: any) => (typeof c?.text === 'string' ? c.text : '')).join(' ')
-          : '';
-    if (text.includes(needle)) return true;
-  }
-  return false;
-}
-
-/**
- * Reply into an existing session by typing into its live PTY — spawning one
- * first (and waiting out its startup) only if it doesn't already have one.
- * `file` is that session's transcript path (the caller already has it from
- * the snapshot), used only to poll for completion; nothing about how it's
- * read changes.
- */
-export function sendToSession(
-  sessionId: string,
-  cwd: string,
-  file: string,
-  text: string,
-  images: string[] | undefined,
-  /** `wasLiveElsewhere` is true when another interactive process already had
-   *  this session open at send time — the send still went out, but its
-   *  output may be interleaved with that other process's. */
-  onDone: (wasLiveElsewhere: boolean) => void,
-  onError: (msg: string) => void,
-  onCancelled: () => void,
-): SendHandle {
-  const fullText = withImageNotes(text, sessionId, images);
-  let cancelled = false;
-  let ptyRef: IPty | null = null;
-  const handle: SendHandle = {
-    cancel: () => {
-      cancelled = true;
-      try {
-        ptyRef?.write('\x1b');
-      } catch {
-        /* not spawned yet, or already dead — nothing to interrupt either way */
-      }
-    },
-  };
-
-  void (async () => {
-    // Ground-truth pre-flight: informational only. A second, genuinely
-    // OTHER `--resume` into a session already attached elsewhere WILL
-    // collide with it (confirmed the hard way — both just run, interleaving
-    // into the same transcript with no way to tell which turn is whose) —
-    // but that's the caller's call to make, not this daemon's to silently
-    // block.
-    const wasLiveElsewhere = await isSessionLiveElsewhere(sessionId);
-    if (cancelled) {
-      onCancelled();
-      return;
-    }
-
-    let entry: PersistentPty;
-    try {
-      entry = await getOrSpawnPty(sessionId, cwd);
-    } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
-      return;
-    }
-    ptyRef = entry.pty;
-    // Cancelled while we were (possibly first-time, slow) spawning/warming
-    // up — the PTY itself stays in the pool for next time, just don't type
-    // into it for a request that's no longer wanted.
-    if (cancelled) {
-      onCancelled();
-      return;
-    }
-
-    const linesBefore = await countLines(file);
-    try {
-      // Clear whatever might already be sitting on the input line before
-      // typing — confirmed the hard way that it isn't always empty: the CLI
-      // restores an interrupted (Escape'd) message back into the input box
-      // for editing, exactly as it would for a human at the keyboard. A
-      // human seeing that would clear it before typing the next thing;
-      // Shepherd writes blindly and has no such feedback loop, so a message
-      // sent right after a cancelled one landed concatenated with it
-      // ("...number.\rReply with exactly: ..." as ONE literal turn). Ctrl-A
-      // (start of line) + Ctrl-K (kill to end) clears it regardless of where
-      // the cursor happens to sit; a no-op if the line was already empty.
-      entry.pty.write('\x01\x0b');
-      entry.pty.write(`${fullText}\r`);
-    } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
-      return;
-    }
-    // Same clear-line-then-type sequence as the initial send, replayed once
-    // by waitForTurnToFinish if there's zero sign the first attempt was ever
-    // read — see its own comment for why a quiet PTY isn't always a ready one.
-    const retype = () => {
-      try {
-        entry.pty.write('\x01\x0b');
-        entry.pty.write(`${fullText}\r`);
-      } catch {
-        /* already dead — the outer timeout path reports this */
-      }
-    };
-    const outcome = await waitForTurnToFinish(file, sessionId, () => cancelled, retype);
-    entry.lastActivity = Date.now();
-    if (outcome === 'timeout') {
-      // Unlike a disposable per-turn process, this PTY is the session's
-      // long-lived one — a mere confirmation timeout doesn't warrant
-      // killing it (it may just be a slow-running turn). Leave it up;
-      // report the uncertainty so the caller can retry or wait and recheck.
-      onError('could not confirm the message was processed in time — it may still be running; check back or retry');
-      return;
-    }
-    if (outcome === 'cancelled') {
-      onCancelled();
-      return;
-    }
-    if (outcome === 'error') {
-      onError('session reported an error');
-      return;
-    }
-    // "done" per aggregate transcript state alone is NOT proof our specific
-    // message actually landed — a live-elsewhere session cycling through its
-    // OWN unrelated working→idle transition satisfies that same heuristic,
-    // producing a false "sent" while our input never actually got read at
-    // all (confirmed the exact failure mode this guards against: Shepherd
-    // reported success, the agent never reacted, because two `--resume`
-    // processes on one session don't reliably both get to submit input).
-    const landed = await didMessageLand(file, fullText, linesBefore);
-    if (!landed) {
-      onError('message may not have been processed — this session appears to be in active use elsewhere');
-      return;
-    }
-    onDone(wasLiveElsewhere);
-  })();
-
-  return handle;
 }
 
 /**
