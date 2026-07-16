@@ -22,10 +22,6 @@ export interface Shepherd {
   focus: (file: string, sessionId: string) => void;
   unfocus: () => void;
   loadMore: () => void;
-  /** Latest raw output chunk for the attached terminal session, or null if
-   *  nothing has streamed yet this attach. Cleared to null on session switch
-   *  so a stale chunk never gets replayed into the wrong TerminalView. */
-  termChunk: string | null;
   /** Bumped every time the attached session changes — TerminalView keys off
    *  this to force a fresh xterm.js instance rather than reusing one across
    *  sessions. */
@@ -34,6 +30,19 @@ export interface Shepherd {
   detachTerminal: (sessionId: string) => void;
   sendTermInput: (sessionId: string, cwd: string, text: string, images?: string[]) => void;
   resizeTerm: (sessionId: string, cols: number, rows: number) => void;
+  /** Register a listener that fires for every raw output chunk of the
+   *  CURRENTLY attached session, called directly and synchronously from the
+   *  WS message handler — deliberately NOT routed through React state.
+   *  `useState` only ever holds the latest value; a burst of `termOutput`
+   *  messages arriving faster than a render cycle (completely normal for a
+   *  live terminal — a spinner alone can redraw many times a second) has
+   *  React batch/coalesce the updates, so every chunk except the last in a
+   *  batch is silently dropped before its effect ever runs (confirmed the
+   *  hard way: the terminal froze on a stale mid-spinner frame while the
+   *  real session had already finished and gone idle — the "done" chunk
+   *  never got applied because an earlier setState call in the same batch
+   *  was thrown away). Returns an unsubscribe function. */
+  subscribeTerminal: (onChunk: (chunk: string) => void) => () => void;
   termError: string | null;
   /** Ask the daemon to spawn a fresh session in this product's repo root. */
   spawn: (product: string) => void;
@@ -90,7 +99,6 @@ export function useShepherd(): Shepherd {
   const [connected, setConnected] = useState(false);
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
-  const [termChunk, setTermChunk] = useState<string | null>(null);
   const [termResetKey, setTermResetKey] = useState('');
   const [termError, setTermError] = useState<string | null>(null);
   const [activeSubagents, setActiveSubagents] = useState<SubagentInfo[]>([]);
@@ -111,6 +119,9 @@ export function useShepherd(): Shepherd {
   subagentModalRef.current = subagentModal;
   // Cache the loaded window per session so re-focusing is instant.
   const cache = useRef<Map<string, Loaded>>(new Map());
+  // Raw-output listeners for the currently attached terminal — see
+  // `subscribeTerminal`'s doc comment for why this bypasses React state.
+  const termListeners = useRef<Set<(chunk: string) => void>>(new Set());
 
   useEffect(() => {
     let stopped = false;
@@ -183,7 +194,7 @@ export function useShepherd(): Shepherd {
           setSubagentModal((prev) => (prev && prev.agentId === d.agentId ? { ...prev, messages: d.messages } : prev));
         } else if (d.type === 'termOutput') {
           if (d.sessionId !== focusRef.current?.sessionId) return;
-          setTermChunk(d.chunk);
+          for (const fn of termListeners.current) fn(d.chunk);
         } else if (d.type === 'termError') {
           if (d.sessionId !== focusRef.current?.sessionId) return;
           setTermError(d.error);
@@ -242,7 +253,6 @@ export function useShepherd(): Shepherd {
   }, []);
 
   const attachTerminal = useCallback((sessionId: string, cwd: string) => {
-    setTermChunk(null);
     setTermError(null);
     setTermResetKey(sessionId);
     wsSend(wsRef.current, { type: 'attachTerm', sessionId, cwd });
@@ -250,6 +260,13 @@ export function useShepherd(): Shepherd {
 
   const detachTerminal = useCallback((sessionId: string) => {
     wsSend(wsRef.current, { type: 'detachTerm', sessionId });
+  }, []);
+
+  const subscribeTerminal = useCallback((onChunk: (chunk: string) => void) => {
+    termListeners.current.add(onChunk);
+    return () => {
+      termListeners.current.delete(onChunk);
+    };
   }, []);
 
   const sendTermInput = useCallback((sessionId: string, cwd: string, text: string, images?: string[]) => {
@@ -291,13 +308,13 @@ export function useShepherd(): Shepherd {
     focus,
     unfocus,
     loadMore,
-    termChunk,
     termResetKey,
     termError,
     attachTerminal,
     detachTerminal,
     sendTermInput,
     resizeTerm,
+    subscribeTerminal,
     spawn,
     spawningProducts: new Set(spawning.keys()),
     activeSubagents,

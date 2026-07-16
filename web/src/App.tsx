@@ -28,11 +28,11 @@ export function App() {
     focusedId,
     focus,
     unfocus,
-    termChunk,
     termResetKey,
     termError,
     attachTerminal,
     detachTerminal,
+    subscribeTerminal,
     sendTermInput,
     resizeTerm,
     spawn,
@@ -185,7 +185,7 @@ export function App() {
           onSelectSubagent={(s) => openSubagent(focused.file, focused.sessionId, s.agentId, s.description)}
           onCloseSubagent={closeSubagent}
           subagentModal={subagentModal}
-          termChunk={termChunk}
+          subscribeTerminal={subscribeTerminal}
           termResetKey={termResetKey}
           termError={termError}
           onAttachTerminal={attachTerminal}

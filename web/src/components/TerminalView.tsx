@@ -3,13 +3,22 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 
-/** Renders a session's live raw PTY output. `chunk` is the latest raw text
- *  to append; `resetKey` changing forces a fresh Terminal instance (used
- *  when switching sessions, since xterm.js doesn't support re-pointing one
- *  instance at a different backing stream cleanly). Font size mirrors the
- *  app's existing A-/A+ control directly via xterm's own `fontSize` option,
- *  not the old `--chat-font` CSS variable (which only ever styled the chat
- *  reconstruction this replaces).
+/** Renders a session's live raw PTY output. `resetKey` changing forces a
+ *  fresh Terminal instance (used when switching sessions, since xterm.js
+ *  doesn't support re-pointing one instance at a different backing stream
+ *  cleanly). Font size mirrors the app's existing A-/A+ control directly via
+ *  xterm's own `fontSize` option, not the old `--chat-font` CSS variable
+ *  (which only ever styled the chat reconstruction this replaces).
+ *
+ *  `subscribeTerminal` is called directly in the mount effect and every
+ *  chunk is written straight to the Terminal instance — deliberately NOT
+ *  passed in as a `chunk` prop updated via `useState`. A burst of output
+ *  arriving faster than a render cycle (normal for a live terminal — a
+ *  spinner alone redraws many times a second) has React batch/coalesce
+ *  state updates, silently dropping every chunk in a batch except the last
+ *  (confirmed the hard way: the terminal froze on a stale mid-spinner frame
+ *  while the real session had already gone idle). Subscribing directly
+ *  means every chunk is applied, in order, with nothing in between to drop it.
  *
  *  `onResize` is captured in a ref (kept fresh every render) rather than
  *  listed as an effect dependency — it's a fresh function identity on every
@@ -17,12 +26,12 @@ import '@xterm/xterm/css/xterm.css';
  *  rebuild on every render instead of only on a genuine session switch. */
 export function TerminalView({
   resetKey,
-  chunk,
+  subscribeTerminal,
   fontSize,
   onResize,
 }: {
   resetKey: string;
-  chunk: string | null;
+  subscribeTerminal: (onChunk: (chunk: string) => void) => () => void;
   fontSize: number;
   onResize: (cols: number, rows: number) => void;
 }) {
@@ -32,6 +41,8 @@ export function TerminalView({
   onResizeRef.current = onResize;
   const fontSizeRef = useRef(fontSize);
   fontSizeRef.current = fontSize;
+  const subscribeRef = useRef(subscribeTerminal);
+  subscribeRef.current = subscribeTerminal;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -54,6 +65,8 @@ export function TerminalView({
     onResizeRef.current(term.cols, term.rows);
     termRef.current = term;
 
+    const unsubscribe = subscribeRef.current((chunk) => term.write(chunk));
+
     const ro = new ResizeObserver(() => {
       fit.fit();
       onResizeRef.current(term.cols, term.rows);
@@ -61,6 +74,7 @@ export function TerminalView({
     ro.observe(container);
 
     return () => {
+      unsubscribe();
       ro.disconnect();
       term.dispose();
       termRef.current = null;
@@ -70,10 +84,6 @@ export function TerminalView({
   useEffect(() => {
     if (termRef.current) termRef.current.options.fontSize = fontSize;
   }, [fontSize]);
-
-  useEffect(() => {
-    if (termRef.current && chunk) termRef.current.write(chunk);
-  }, [chunk]);
 
   return <div className="terminal-view" ref={containerRef} />;
 }

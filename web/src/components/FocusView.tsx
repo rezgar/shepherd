@@ -23,13 +23,13 @@ export function FocusView({
   onSelectSubagent,
   onCloseSubagent,
   subagentModal,
-  termChunk,
   termResetKey,
   termError,
   onAttachTerminal,
   onDetachTerminal,
   onSendTermInput,
   onResizeTerm,
+  subscribeTerminal,
 }: {
   agents: AgentModel[];
   focused: AgentModel;
@@ -48,13 +48,13 @@ export function FocusView({
   onSelectSubagent: (s: SubagentInfo) => void;
   onCloseSubagent: () => void;
   subagentModal: { agentId: string; description: string; messages: ChatMsg[] | null } | null;
-  termChunk: string | null;
   termResetKey: string;
   termError: string | null;
   onAttachTerminal: (sessionId: string, cwd: string) => void;
   onDetachTerminal: (sessionId: string) => void;
   onSendTermInput: (sessionId: string, cwd: string, text: string, images?: string[]) => void;
   onResizeTerm: (sessionId: string, cols: number, rows: number) => void;
+  subscribeTerminal: (onChunk: (chunk: string) => void) => () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
@@ -164,7 +164,7 @@ export function FocusView({
 
         <TerminalView
           resetKey={termResetKey}
-          chunk={termChunk}
+          subscribeTerminal={subscribeTerminal}
           fontSize={fontSize}
           onResize={(cols, rows) => onResizeTerm(focused.sessionId, cols, rows)}
         />
