@@ -58,7 +58,22 @@ import '@xterm/xterm/css/xterm.css';
  *  a drag can even start — and silently broke copy entirely, since
  *  yanking focus away mid-gesture stops xterm's own mousemove-driven
  *  selection tracking from ever registering a selection in the first
- *  place, not just from surviving until Ctrl+C. */
+ *  place, not just from surviving until Ctrl+C.
+ *
+ *  A fresh attach's replayed scrollback (see attachTerminal's ring-buffer
+ *  replay) can render corrupted — words fused together, lines misaligned —
+ *  because it's raw bytes the CLI wrapped for whatever terminal width the
+ *  PTY happened to be at when they were originally written, being fed into
+ *  an xterm.js instance that's reflowing them at THIS client's own fit()
+ *  width instead. The size sent on mount doesn't reliably fix this even
+ *  when it's a genuine change, because it races the replay itself — sent
+ *  from the same effect, it can reach the server before or after the
+ *  replay it needs to invalidate. Confirmed the hard way that only a
+ *  resize sent well AFTER content has landed (e.g. manually clicking
+ *  A-/A+) reliably forces the CLI to do a full fresh repaint that
+ *  overwrites the corruption. `onFirstChunk` below reproduces that by
+ *  construction — tied to "the first chunk (replay or live) has actually
+ *  been written", not a guessed timeout. */
 export function TerminalView({
   resetKey,
   subscribeTerminal,
@@ -127,7 +142,21 @@ export function TerminalView({
     };
     container.addEventListener('mouseup', releaseFocusIfNoSelection);
 
-    const unsubscribe = subscribeRef.current((chunk) => term.write(chunk));
+    let onFirstChunk: (() => void) | null = () => {
+      onFirstChunk = null;
+      // Force a genuine size change so the CLI does a full fresh repaint —
+      // see the doc comment above. Nudging by one column and back
+      // guarantees an actual change is observed even if term.cols already
+      // happens to match the PTY's current size (a same-size resize call
+      // is a no-op that triggers no repaint at all).
+      const { cols, rows } = term;
+      onResizeRef.current(Math.max(1, cols - 1), rows);
+      onResizeRef.current(cols, rows);
+    };
+    const unsubscribe = subscribeRef.current((chunk) => {
+      term.write(chunk);
+      onFirstChunk?.();
+    });
 
     const ro = new ResizeObserver(() => {
       fit.fit();
