@@ -9,6 +9,8 @@ export function ProjectLane({
   onSelect,
   nameOf,
   onHide,
+  onSpawn,
+  spawningProducts,
 }: {
   product: string;
   agents: AgentModel[];
@@ -17,6 +19,8 @@ export function ProjectLane({
   onSelect: (a: AgentModel) => void;
   nameOf: (a: AgentModel) => string;
   onHide: (sessionId: string) => void;
+  onSpawn: (product: string) => void;
+  spawningProducts: Set<string>;
 }) {
   const needs = agents.filter((a) => a.state === 'needs-you').length;
 
@@ -38,6 +42,14 @@ export function ProjectLane({
             onHide={() => onHide(a.sessionId)}
           />
         ))}
+        <button
+          className="new-session-card"
+          disabled={spawningProducts.has(product)}
+          onClick={() => onSpawn(product)}
+          title={`Start a new session in ${product}`}
+        >
+          {spawningProducts.has(product) ? '…' : '+'}
+        </button>
       </div>
     </div>
   );

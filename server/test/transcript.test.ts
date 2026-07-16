@@ -163,6 +163,90 @@ describe('parseTranscript: active subagents', () => {
     expect(messages.at(-1)!.tools[0].questions).toBeUndefined();
   });
 
+  it('renders an AskUserQuestion tool_result as the person\'s answer instead of dropping it', async () => {
+    const f = write('ask-answered.jsonl', [
+      {
+        type: 'assistant',
+        timestamp: '2026-07-14T12:00:00.000Z',
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool_use',
+              id: 'toolu_ask2',
+              name: 'AskUserQuestion',
+              input: { questions: [{ question: 'Which approach?', options: [{ label: 'A' }, { label: 'B' }] }] },
+            },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        timestamp: '2026-07-14T12:00:05.000Z',
+        message: {
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 'toolu_ask2', content: 'Your questions have been answered: "Which approach?"="A"' },
+          ],
+        },
+      },
+    ]);
+    const { messages } = await parseTranscript(f, 'parent-ask2');
+    const answer = messages.at(-1)!;
+    expect(answer.role).toBe('user');
+    expect(answer.text).toContain('"A"');
+  });
+
+  it('drops the synthetic "[Request interrupted by user]" notice instead of rendering it as something the person said', async () => {
+    const f = write('interrupted.jsonl', [
+      {
+        type: 'assistant',
+        timestamp: '2026-07-14T12:00:00.000Z',
+        message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_ask3', name: 'AskUserQuestion', input: { questions: [] } }] },
+      },
+      {
+        type: 'user',
+        timestamp: '2026-07-14T12:00:01.000Z',
+        message: { role: 'user', content: '[Request interrupted by user]' },
+      },
+      {
+        type: 'user',
+        timestamp: '2026-07-14T12:00:02.000Z',
+        message: { role: 'user', content: 'One issue for everything, also add this bug' },
+      },
+    ]);
+    const { messages } = await parseTranscript(f, 'parent-ask3');
+    expect(messages.some((m) => m.text.includes('Request interrupted'))).toBe(false);
+    expect(messages.some((m) => m.text.includes('One issue for everything'))).toBe(true);
+  });
+
+  it('drops the "/exit" command echo and its "Goodbye!" reply used to close out a PTY-driven send', async () => {
+    const f = write('exit-noise.jsonl', [
+      {
+        type: 'assistant',
+        timestamp: '2026-07-16T12:00:00.000Z',
+        message: { role: 'assistant', content: [{ type: 'text', text: 'Done — the fix is in place.' }] },
+      },
+      {
+        type: 'user',
+        timestamp: '2026-07-16T12:00:01.000Z',
+        message: {
+          role: 'user',
+          content: '<command-name>/exit</command-name>\n            <command-message>exit</command-message>\n            <command-args></command-args>',
+        },
+      },
+      {
+        type: 'user',
+        timestamp: '2026-07-16T12:00:02.000Z',
+        message: { role: 'user', content: '<local-command-stdout>Goodbye!</local-command-stdout>' },
+      },
+    ]);
+    const { messages } = await parseTranscript(f, 'parent-exit');
+    expect(messages.some((m) => m.text.includes('command-name'))).toBe(false);
+    expect(messages.some((m) => m.text.includes('Goodbye'))).toBe(false);
+    expect(messages.some((m) => m.text.includes('Done — the fix is in place'))).toBe(true);
+  });
+
   it('never renders the task-notification body as a chat message', async () => {
     const f = write('notif-render.jsonl', [
       dispatch('toolu_6', 'Audit scan pipeline', '2026-07-14T12:00:00.000Z'),

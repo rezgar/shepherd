@@ -10,6 +10,14 @@ export type Stage =
 
 export type ActionKind = 'approve' | 'question';
 
+/** Current + upcoming tasks, derived from the session's own TodoWrite/
+ *  TaskCreate/TaskUpdate tool calls — undefined for sessions that never used
+ *  one. Completed items are dropped; only what's happening now and next matters. */
+export interface TaskLine {
+  current: string | null;
+  upcoming: string[];
+}
+
 /** One Claude Code session, as Shepherd sees it. */
 export interface AgentModel {
   sessionId: string;
@@ -43,6 +51,8 @@ export interface AgentModel {
   queued: number;
   /** Source transcript path. */
   file: string;
+  /** Done/current/next task tracking, if the session used TodoWrite/TaskCreate. */
+  taskLine?: TaskLine;
 }
 
 export interface Snapshot {

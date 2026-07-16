@@ -26,6 +26,10 @@ export function Composer({
   onSend,
   sending,
   onCancel,
+  hasQueued,
+  onEditQueued,
+  onForceSendQueued,
+  inputRef,
 }: {
   initialDraft: ComposerDraft | undefined;
   onDraftChange: (draft: ComposerDraft) => void;
@@ -33,10 +37,23 @@ export function Composer({
   onSend: (text: string, images?: string[]) => void;
   sending: boolean;
   onCancel: () => void;
+  /** True when this session already has a queued (unsent) draft — ↑ in an
+   *  empty composer edits that instead of recalling the last sent message. */
+  hasQueued: boolean;
+  /** Pulls the queued draft back into the composer for editing (the parent
+   *  owns the actual dequeue + remount, since this component never sees the
+   *  queued text itself). */
+  onEditQueued: () => void;
+  /** Enter/Send with an empty composer while a message is queued: stop
+   *  whatever's running (if Shepherd can) and send the next queued one now. */
+  onForceSendQueued: () => void;
+  /** Exposes the textarea node so the parent can reclaim focus for it (e.g.
+   *  after a click elsewhere that isn't itself a text field). */
+  inputRef?: React.MutableRefObject<HTMLTextAreaElement | null>;
 }) {
   const [value, setValue] = useState(initialDraft?.text ?? '');
   const [images, setImages] = useState<PastedImage[]>(initialDraft?.images ?? []);
-  const ref = useRef<HTMLTextAreaElement>(null);
+  const ref = useRef<HTMLTextAreaElement | null>(null);
 
   // Mirror every edit up to the parent's per-session store so it survives a
   // session switch (which unmounts/remounts this via its key).
@@ -44,9 +61,22 @@ export function Composer({
     onDraftChange({ text: value, images });
   }, [value, images, onDraftChange]);
 
+  // Grows with newlines (Shift+Enter) up to 3 lines, then scrolls internally
+  // rather than growing further — snaps back to 1 the moment it's cleared.
+  const rows = Math.min(3, Math.max(1, value.split('\n').length));
+
   const submit = () => {
     const t = value.trim();
-    if ((!t && !images.length) || sending) return;
+    if (!t && !images.length) {
+      if (hasQueued) onForceSendQueued();
+      return;
+    }
+    // No `sending` guard here — this always calls through to the parent's
+    // dispatch, which is the single source of truth for queue-vs-send-now
+    // (including treating an in-flight send as a reason to queue). A guard
+    // here that just dropped the message on the floor while sending was
+    // exactly why queuing looked broken: pressing Enter while busy did
+    // nothing at all, not even queue it (confirmed the hard way).
     onSend(t, images.map((i) => i.dataUrl));
     setValue('');
     setImages([]);
@@ -72,7 +102,10 @@ export function Composer({
   const removeImage = (id: string) => setImages((imgs) => imgs.filter((i) => i.id !== id));
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'ArrowUp' && value.trim() === '' && lastUserMessage) {
+    if (e.key === 'ArrowUp' && value.trim() === '' && hasQueued) {
+      e.preventDefault();
+      onEditQueued();
+    } else if (e.key === 'ArrowUp' && value.trim() === '' && lastUserMessage) {
       e.preventDefault();
       setValue(lastUserMessage);
       requestAnimationFrame(() => {
@@ -105,11 +138,15 @@ export function Composer({
       )}
       <div className="composer__row">
         <textarea
-          ref={ref}
+          ref={(el) => {
+            ref.current = el;
+            if (inputRef) inputRef.current = el;
+          }}
           className="composer__input"
           placeholder="Message this agent…   (Enter to send · Shift+Enter for newline · ↑ to edit last · paste an image to attach)"
           value={value}
-          rows={1}
+          rows={rows}
+          autoFocus
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
@@ -122,9 +159,10 @@ export function Composer({
           <button
             className="composer__send composer__send--live"
             onClick={submit}
-            disabled={!value.trim() && !images.length}
+            disabled={!value.trim() && !images.length && !hasQueued}
+            title={!value.trim() && !images.length && hasQueued ? 'Stop (if possible) and send the next queued message now' : undefined}
           >
-            Send
+            {!value.trim() && !images.length && hasQueued ? 'Send next' : 'Send'}
           </button>
         )}
       </div>

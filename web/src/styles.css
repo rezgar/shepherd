@@ -82,6 +82,41 @@ body {
   padding: 3px 6px;
   font-size: 12px;
 }
+.limits {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.limits__bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.limits__label {
+  font-weight: 600;
+  color: #8b949e;
+}
+.limits__segments {
+  display: flex;
+  gap: 1.5px;
+}
+.limits__segments i {
+  display: inline-block;
+  width: 6px;
+  height: 11px;
+  border-radius: 1px;
+  background: #21262d;
+  font-style: normal;
+}
+.limits__segments i.on {
+  background: var(--amber);
+}
+.limits__pct {
+  color: var(--muted);
+  white-space: nowrap;
+}
 .hidden-toggle {
   font-size: 12px;
   color: var(--muted);
@@ -157,6 +192,55 @@ body {
 .conn.off {
   color: var(--amber);
   background: #2a1a08;
+}
+
+/* ---- daemon connection banner ---- */
+.conn-banner {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 16px;
+  background: #3a1200;
+  border-bottom: 2px solid #f85149;
+  color: #ffb4a8;
+  font-size: 13px;
+}
+.conn-banner__text {
+  font-weight: 600;
+}
+.conn-banner__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.conn-banner__restart {
+  background: #f85149;
+  color: #1a0500;
+  border: none;
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.conn-banner__restart:hover {
+  background: #ff6b61;
+}
+.conn-banner__restart:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.conn-banner__result {
+  font-size: 12px;
+}
+.conn-banner__result--ok {
+  color: #7ee787;
+}
+.conn-banner__result--error {
+  color: #ffb4a8;
 }
 
 .empty {
@@ -387,10 +471,23 @@ body {
 }
 
 /* ---- focus view ---- */
-.focus {
+.focus-shell {
   height: 100vh;
   display: flex;
   flex-direction: column;
+}
+.focus {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+}
+.focus__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 .focus__bar {
   display: flex;
@@ -400,6 +497,26 @@ body {
   background: #0b0f14;
   border-bottom: 1px solid var(--line);
   font-size: 13px;
+}
+.live-elsewhere-warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 14px;
+  background: #2a1f08;
+  border-bottom: 1px solid var(--amber);
+  color: var(--amber);
+  font-size: 12px;
+}
+.live-elsewhere-warning button {
+  background: transparent;
+  border: none;
+  color: var(--amber);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 4px;
 }
 .focus__back {
   background: #161b22;
@@ -479,15 +596,20 @@ body {
   border-color: #58a6ff;
 }
 
-/* ---- strip ---- */
+/* ---- strip — a left rail of session cards, grouped by product ---- */
 .strip {
   display: flex;
+  flex-direction: column;
   gap: 14px;
   padding: 10px 12px;
   background: #080b10;
-  border-bottom: 1px solid var(--line);
-  overflow-x: auto;
-  flex: 0 0 auto;
+  border-right: 1px solid var(--line);
+  border-bottom: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 0 0 200px;
+  width: 200px;
+  height: 100vh;
 }
 .strip__group {
   flex: 0 0 auto;
@@ -501,12 +623,42 @@ body {
 }
 .strip__cards {
   display: flex;
+  flex-direction: column;
   gap: 8px;
   padding: 7px;
   background: #0c1119;
   border: 1px solid var(--line);
   border-top: none;
   border-radius: 0 8px 8px 8px;
+}
+.new-session-card {
+  flex: 0 0 auto;
+  width: 36px;
+  align-self: stretch;
+  background: transparent;
+  border: 1px dashed #30363d;
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.new-session-card:hover:not(:disabled) {
+  border-color: #58a6ff;
+  color: #58a6ff;
+  background: #0d1a2e;
+}
+.new-session-card:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+/* The strip stacks cards vertically (it's a left rail) — the + card follows
+ * suit: a short full-width button under the stack instead of a thin sliver
+ * beside it. */
+.strip__cards .new-session-card {
+  width: 150px;
+  height: 32px;
+  align-self: flex-start;
 }
 
 /* ---- chat ---- */
@@ -857,6 +1009,19 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.working-indicator__taskline {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.working-indicator__current {
+  color: #e6f5e9;
+}
+.working-indicator__upcoming {
+  color: #5c8a63;
+  margin-left: 10px;
+}
 .working-indicator__subagents {
   display: flex;
   flex-wrap: wrap;
@@ -937,6 +1102,86 @@ body {
   flex-direction: column;
 }
 
+/* ---- queued message (held back because the session was busy) ---- */
+.queued-msg {
+  flex: 0 0 auto;
+  margin: 0 16px;
+  padding: 8px 12px;
+  border: 1px dashed var(--amber);
+  border-radius: 8px;
+  background: #1a1408;
+}
+.queued-msg__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.queued-msg__badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--amber);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.queued-msg__actions {
+  display: flex;
+  gap: 4px;
+}
+.queued-msg__edit,
+.queued-msg__delete {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.queued-msg__edit:hover,
+.queued-msg__delete:hover {
+  color: #e6edf3;
+  background: #2a2110;
+}
+.queued-msg__text {
+  margin-top: 4px;
+  font-size: 13px;
+  color: #e6d9b8;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+.queued-msg__images {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+.queued-msg__images img {
+  max-height: 60px;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+}
+.queued-msg--blocked {
+  border-color: #f85149;
+  background: #1a0e0e;
+}
+.queued-msg--blocked .queued-msg__badge {
+  color: #f85149;
+}
+.queued-msg__retry {
+  background: transparent;
+  border: 1px solid #f85149;
+  color: #f85149;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.queued-msg__retry:hover {
+  background: #f8514922;
+}
+
 /* ---- composer ---- */
 .composer {
   flex: 0 0 auto;
@@ -1014,6 +1259,8 @@ body {
   padding: 0 16px;
   font-weight: 600;
   cursor: pointer;
+  align-self: flex-end;
+  height: 40px;
 }
 .composer__send--live:not(:disabled) {
   background: #238636;
