@@ -30,6 +30,10 @@ export interface Shepherd {
   detachTerminal: (sessionId: string) => void;
   sendTermInput: (sessionId: string, cwd: string, text: string, images?: string[]) => void;
   resizeTerm: (sessionId: string, cols: number, rows: number) => void;
+  /** Write a raw control key straight to the pty — no composed line, no
+   *  trailing Enter, just the byte(s) themselves (e.g. Escape to interrupt
+   *  generation, same as pressing it at a real keyboard). */
+  sendTerminalKey: (sessionId: string, cwd: string, key: string) => void;
   /** Register a listener that fires for every raw output chunk of the
    *  CURRENTLY attached session, called directly and synchronously from the
    *  WS message handler — deliberately NOT routed through React state.
@@ -278,6 +282,10 @@ export function useShepherd(): Shepherd {
     wsSend(wsRef.current, { type: 'termResize', sessionId, cols, rows });
   }, []);
 
+  const sendTerminalKey = useCallback((sessionId: string, cwd: string, key: string) => {
+    wsSend(wsRef.current, { type: 'termKey', sessionId, cwd, key });
+  }, []);
+
   const spawn = useCallback((product: string) => {
     const since = Date.now();
     wsSend(wsRef.current, { type: 'spawn', product });
@@ -314,6 +322,7 @@ export function useShepherd(): Shepherd {
     detachTerminal,
     sendTermInput,
     resizeTerm,
+    sendTerminalKey,
     subscribeTerminal,
     spawn,
     spawningProducts: new Set(spawning.keys()),

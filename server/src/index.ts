@@ -3,7 +3,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import chokidar from 'chokidar';
 import { scanAll, PROJECTS_DIR } from './scan.js';
 import { parseTranscript } from './transcript.js';
-import { attachTerminal, detachTerminal, writeTermInput, resizeTerm, spawnSession, startIdleEvictionSweep, shutdownAllSessions } from './sender.js';
+import { attachTerminal, detachTerminal, writeTermInput, resizeTerm, sendTerminalKey, spawnSession, startIdleEvictionSweep, shutdownAllSessions } from './sender.js';
 import { computeLimits, type Limits } from './usage.js';
 import type { Snapshot } from './types.js';
 
@@ -232,6 +232,17 @@ async function main() {
         });
       } else if (m.type === 'termResize' && m.sessionId && typeof m.cols === 'number' && typeof m.rows === 'number') {
         resizeTerm(m.sessionId, m.cols, m.rows);
+      } else if (m.type === 'termKey' && m.sessionId && m.cwd && typeof m.key === 'string') {
+        void sendTerminalKey(m.sessionId, m.cwd, m.key).catch((e) => {
+          if (ws.readyState === 1)
+            ws.send(
+              JSON.stringify({
+                type: 'termError',
+                sessionId: m.sessionId,
+                error: e instanceof Error ? e.message : String(e),
+              }),
+            );
+        });
       } else if (m.type === 'spawn' && typeof m.product === 'string') {
         // Any current session in that product names the repo root — a fresh
         // session always lands there, never in a specific worktree.
