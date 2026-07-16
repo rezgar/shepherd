@@ -46,6 +46,11 @@ export interface Shepherd {
   cancel: (sessionId: string) => void;
   /** Sessions with an in-flight reply. */
   sendingIds: Set<string>;
+  /** sessionId -> when its current in-flight send started (Date.now()) — lets
+   *  the UI show elapsed time and offer a way out once it's been a while,
+   *  instead of an unexplained "sending…" with no sense of whether it's
+   *  normal or stuck. */
+  sendingSince: Record<string, number>;
   /** Hold a message client-side instead of sending — used while the session
    *  is busy. Appends to that session's queue; drains one at a time, oldest
    *  first, each only once the session is no longer "working". */
@@ -127,6 +132,7 @@ export function useShepherd(): Shepherd {
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [sendingIds, setSendingIds] = useState<Set<string>>(() => new Set());
+  const [sendingSince, setSendingSince] = useState<Record<string, number>>({});
   // Shown instantly on send, before the CLI round-trip writes the real transcript
   // line — cleared once that reply lands (send-done/send-error/send-cancelled),
   // never merged into `loaded` itself so there's no id to reconcile against the
@@ -261,6 +267,11 @@ export function useShepherd(): Shepherd {
             n.delete(d.sessionId);
             return n;
           });
+          setSendingSince((s) => {
+            if (!(d.sessionId in s)) return s;
+            const { [d.sessionId]: _drop, ...rest } = s;
+            return rest;
+          });
           // A failed send would otherwise just vanish — the echo is dropped
           // and nothing else remembers the text. Put it back at the front of
           // the queue instead, so it's visible and retriable rather than lost.
@@ -308,6 +319,7 @@ export function useShepherd(): Shepherd {
         // clears these — leaving the composer stuck on "Sending…" forever.
         // Release them: after a disconnect the send is unrecoverable anyway.
         setSendingIds((s) => (s.size ? new Set() : s));
+        setSendingSince((s) => (Object.keys(s).length ? {} : s));
         setPending((p) => (Object.keys(p).length ? {} : p));
         if (!stopped) retry = setTimeout(connect, 1500);
       };
@@ -379,6 +391,7 @@ export function useShepherd(): Shepherd {
     }
     wsSend(wsRef.current, { type: 'send', sessionId, cwd, text, images });
     setSendingIds((s) => new Set(s).add(sessionId));
+    setSendingSince((s) => ({ ...s, [sessionId]: Date.now() }));
     const st = loadedRef.current;
     const anchor = st?.sessionId === sessionId ? (st.messages.at(-1)?.id ?? null) : null;
     setPending((p) => ({
@@ -458,6 +471,38 @@ export function useShepherd(): Shepherd {
       n.delete(sessionId);
       return n;
     });
+    setSendingSince((s) => {
+      if (!(sessionId in s)) return s;
+      const { [sessionId]: _drop, ...rest } = s;
+      return rest;
+    });
+    // Escape only interrupts generation — it doesn't erase what you typed
+    // (the CLI itself hands an interrupted message back to its own input
+    // line for a human to edit or resend). Do the parallel thing here
+    // instead of silently discarding it: read it out of the ref (synchronous,
+    // always current — see the matching comment on the send-error path for
+    // why a plain variable read here would race React's own update) and put
+    // it back as an editable queued draft.
+    //
+    // Marked `blocked` — not because it failed, but because that's the ONLY
+    // flag the auto-flush effect (below) respects to skip a draft. Without
+    // it, the effect sees a normal queued draft the instant the snapshot
+    // next reports this session as non-"working" (which happens almost
+    // immediately after a cancel) and re-sends it right back into the PTY on
+    // its own — turning "stop" into "stop, then silently resend the same
+    // message a beat later" (confirmed the hard way: the requeued draft
+    // vanished with nothing in the transcript to show for it). An explicit
+    // Retry is the only thing allowed to send this again.
+    const cancelled = pendingRef.current[sessionId]?.msg ?? null;
+    if (cancelled) {
+      setQueuedMsgs((q) => ({
+        ...q,
+        [sessionId]: [
+          { text: cancelled.text, images: cancelled.images, blocked: true, blockReason: 'stopped — press retry to resend when ready' },
+          ...(q[sessionId] ?? []),
+        ],
+      }));
+    }
     setPending((p) => {
       if (!(sessionId in p)) return p;
       const { [sessionId]: _drop, ...rest } = p;
@@ -529,6 +574,7 @@ export function useShepherd(): Shepherd {
     send,
     cancel,
     sendingIds,
+    sendingSince,
     queueSend,
     dequeueSend,
     queuedMsgs,

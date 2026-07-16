@@ -34,6 +34,7 @@ export function App() {
     send,
     cancel,
     sendingIds,
+    sendingSince,
     queueSend,
     dequeueSend,
     queuedMsgs,
@@ -188,6 +189,7 @@ export function App() {
           onFontSize={changeFont}
           onSend={send}
           sending={sendingIds.has(focused.sessionId)}
+          sendingSince={sendingSince[focused.sessionId]}
           onCancel={cancel}
           onHide={hide}
           onSpawn={spawn}
