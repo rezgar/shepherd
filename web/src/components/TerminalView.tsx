@@ -10,6 +10,20 @@ import '@xterm/xterm/css/xterm.css';
  *  xterm's own `fontSize` option, not the old `--chat-font` CSS variable
  *  (which only ever styled the chat reconstruction this replaces).
  *
+ *  A font-size change re-runs `fit()` to recompute cols/rows for the SAME
+ *  (unchanged) container size, and DOES send that new size to the server —
+ *  this looked wrong at first ("shouldn't font size be purely local?"), but
+ *  every real terminal emulator works exactly this way: the window/pane
+ *  stays a fixed pixel size and the character grid is recomputed on zoom,
+ *  because that's the only way the rendered content can keep exactly
+ *  filling that fixed-size container. An earlier version of this tried to
+ *  hold cols/rows constant across a font change instead, and that's what
+ *  actually broke: same row count at a smaller font needs fewer pixels than
+ *  before, so the fixed-size container was left with a real gap of empty
+ *  space below the content (confirmed the hard way, reproduced by shrinking
+ *  the font a few times). Letting `fit()` run avoids that by construction —
+ *  the rendered grid always exactly matches the container, at any font size.
+ *
  *  `subscribeTerminal` is called directly in the mount effect and every
  *  chunk is written straight to the Terminal instance — deliberately NOT
  *  passed in as a `chunk` prop updated via `useState`. A burst of output
@@ -37,6 +51,7 @@ export function TerminalView({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
   const onResizeRef = useRef(onResize);
   onResizeRef.current = onResize;
   const fontSizeRef = useRef(fontSize);
@@ -64,6 +79,7 @@ export function TerminalView({
     fit.fit();
     onResizeRef.current(term.cols, term.rows);
     termRef.current = term;
+    fitRef.current = fit;
 
     const unsubscribe = subscribeRef.current((chunk) => term.write(chunk));
 
@@ -78,22 +94,17 @@ export function TerminalView({
       ro.disconnect();
       term.dispose();
       termRef.current = null;
+      fitRef.current = null;
     };
   }, [resetKey]);
 
   useEffect(() => {
     const term = termRef.current;
-    if (!term) return;
-    // xterm.js reflows cols/rows to keep filling the same pixel-sized canvas
-    // when font metrics change — confirmed the hard way: A+/A- silently sent
-    // a pty.resize as a side effect, resizing the REMOTE session's terminal
-    // just from a local font-size change. Capture the grid before, and force
-    // it back after, so the only thing that changes is how big the text
-    // renders — this never goes through onResize, so no resize message is
-    // ever sent to the server for a pure font-size adjustment.
-    const { cols, rows } = term;
+    const fit = fitRef.current;
+    if (!term || !fit) return;
     term.options.fontSize = fontSize;
-    if (term.cols !== cols || term.rows !== rows) term.resize(cols, rows);
+    fit.fit();
+    onResizeRef.current(term.cols, term.rows);
   }, [fontSize]);
 
   return <div className="terminal-view" ref={containerRef} />;
