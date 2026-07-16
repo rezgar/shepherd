@@ -82,7 +82,18 @@ export function TerminalView({
   }, [resetKey]);
 
   useEffect(() => {
-    if (termRef.current) termRef.current.options.fontSize = fontSize;
+    const term = termRef.current;
+    if (!term) return;
+    // xterm.js reflows cols/rows to keep filling the same pixel-sized canvas
+    // when font metrics change — confirmed the hard way: A+/A- silently sent
+    // a pty.resize as a side effect, resizing the REMOTE session's terminal
+    // just from a local font-size change. Capture the grid before, and force
+    // it back after, so the only thing that changes is how big the text
+    // renders — this never goes through onResize, so no resize message is
+    // ever sent to the server for a pure font-size adjustment.
+    const { cols, rows } = term;
+    term.options.fontSize = fontSize;
+    if (term.cols !== cols || term.rows !== rows) term.resize(cols, rows);
   }, [fontSize]);
 
   return <div className="terminal-view" ref={containerRef} />;
