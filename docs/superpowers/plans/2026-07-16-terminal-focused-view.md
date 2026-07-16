@@ -77,15 +77,20 @@ export class RingBuffer {
   push(chunk: Buffer): void {
     this.chunks.push(chunk);
     this.total += chunk.length;
-    while (this.total > this.cap && this.chunks.length > 1) {
-      const dropped = this.chunks.shift()!;
-      this.total -= dropped.length;
-    }
-    // A single chunk bigger than the cap: keep only its own tail.
-    if (this.chunks.length === 1 && this.total > this.cap) {
-      const only = this.chunks[0];
-      this.chunks[0] = only.subarray(only.length - this.cap);
-      this.total = this.chunks[0].length;
+    // Trim from the front until back under the cap — a chunk entirely
+    // outside the cap window is dropped whole; one straddling the boundary
+    // is sliced down to just its tail, not dropped wholesale (dropping it
+    // would lose bytes that are still within the cap).
+    while (this.total > this.cap) {
+      const first = this.chunks[0];
+      const excess = this.total - this.cap;
+      if (first.length <= excess) {
+        this.chunks.shift();
+        this.total -= first.length;
+      } else {
+        this.chunks[0] = first.subarray(excess);
+        this.total -= excess;
+      }
     }
   }
 

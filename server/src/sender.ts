@@ -102,11 +102,85 @@ const FIND_NEW_SESSION_TIMEOUT_MS = 90_000;
 const IDLE_EVICT_MS = 30 * 60_000;
 const EVICT_SWEEP_MS = 5 * 60_000;
 
+/** Caps how much raw PTY output a session's ring buffer retains for replay
+ *  on attach/reconnect — big enough to redraw a full screen plus some
+ *  scrollback, small enough that many idle sessions don't add up. */
+const RING_BUFFER_CAP_BYTES = 256 * 1024;
+
+/** Bounded byte buffer of the most recent raw PTY output for one session —
+ *  what a client attaching (or reconnecting) replays before it starts
+ *  receiving live output, so the terminal redraws the current screen instead
+ *  of starting blank. Oldest bytes are dropped first once the cap is hit. */
+export class RingBuffer {
+  private chunks: Buffer[] = [];
+  private total = 0;
+
+  constructor(private readonly cap: number) {}
+
+  push(chunk: Buffer): void {
+    this.chunks.push(chunk);
+    this.total += chunk.length;
+    // Trim from the front until back under the cap — a chunk entirely
+    // outside the cap window is dropped whole; one straddling the boundary
+    // is sliced down to just its tail, not dropped wholesale (dropping it
+    // would lose bytes that are still within the cap).
+    while (this.total > this.cap) {
+      const first = this.chunks[0];
+      const excess = this.total - this.cap;
+      if (first.length <= excess) {
+        this.chunks.shift();
+        this.total -= first.length;
+      } else {
+        this.chunks[0] = first.subarray(excess);
+        this.total -= excess;
+      }
+    }
+  }
+
+  replay(): Buffer {
+    return Buffer.concat(this.chunks);
+  }
+}
+
+/** Serializes async work per key — the structural fix for the concurrent-
+ *  write corruption found in #13: two independent callers writing to the
+ *  same session's PTY at once (e.g. a WS reconnect racing an in-flight send)
+ *  would clear-and-retype over each other. A per-WS-handler check can be
+ *  bypassed by a future code path that forgets it; a lock owned by the PTY
+ *  entry itself cannot be — every write, from wherever it originates, queues
+ *  on the same promise chain and runs strictly one at a time. */
+export class AsyncLock {
+  private tail: Promise<void> = Promise.resolve();
+
+  run<T>(fn: () => Promise<T>): Promise<T> {
+    const result = this.tail.then(fn, fn);
+    this.tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+}
+
+/** The minimal shape sender.ts needs from a WS connection — avoids importing
+ *  the `ws` package's own WebSocket type here just for a `send`/`readyState`
+ *  call; index.ts's FocusWs already satisfies this structurally. */
+interface FocusWsLike {
+  readyState: number;
+  send(data: string): void;
+}
+
 interface PersistentPty {
   pty: IPty;
   pid: number;
   cwd: string;
   lastActivity: number;
+  /** Recent raw output, replayed to a client that attaches or reconnects. */
+  buffer: RingBuffer;
+  /** Structural single-writer guarantee — see AsyncLock. */
+  writeLock: AsyncLock;
+  /** WS connections currently attached to this session's live output. */
+  subscribers: Set<FocusWsLike>;
 }
 
 /** Must drain the pty's output — ConPTY's buffer fills fast against a TUI's
@@ -154,7 +228,15 @@ async function spawnPersistent(sessionId: string, cwd: string): Promise<Persiste
     cwd,
     env: cleanEnv(),
   });
+  const buffer = new RingBuffer(RING_BUFFER_CAP_BYTES);
+  const subscribers = new Set<FocusWsLike>();
   const idleFor = drainAndTrack(p);
+  p.onData((chunk: string) => {
+    buffer.push(Buffer.from(chunk, 'utf8'));
+    for (const sub of subscribers) {
+      if (sub.readyState === 1) sub.send(JSON.stringify({ type: 'termOutput', sessionId, chunk }));
+    }
+  });
   p.onExit(() => {
     // Only remove if this exit is for the entry we think is current — a
     // stale onExit firing after eviction-and-respawn must not delete the
@@ -162,7 +244,7 @@ async function spawnPersistent(sessionId: string, cwd: string): Promise<Persiste
     if (readyPtys.get(sessionId)?.pid === p.pid) readyPtys.delete(sessionId);
   });
   await waitForPtyQuiet(idleFor);
-  return { pty: p, pid: p.pid ?? -1, cwd, lastActivity: Date.now() };
+  return { pty: p, pid: p.pid ?? -1, cwd, lastActivity: Date.now(), buffer, writeLock: new AsyncLock(), subscribers };
 }
 
 /** Reuse this session's live PTY if it has one; otherwise spawn and wait out
@@ -653,10 +735,26 @@ export function spawnSession(
     // From here on, this IS the session's live PTY — register it so every
     // future send reuses this same process instead of spawning a fresh one,
     // exactly like staying in the terminal window you just opened.
+    const buffer = new RingBuffer(RING_BUFFER_CAP_BYTES);
+    const subscribers = new Set<FocusWsLike>();
+    p.onData((chunk: string) => {
+      buffer.push(Buffer.from(chunk, 'utf8'));
+      for (const sub of subscribers) {
+        if (sub.readyState === 1) sub.send(JSON.stringify({ type: 'termOutput', sessionId: found.sessionId, chunk }));
+      }
+    });
     p.onExit(() => {
       if (readyPtys.get(found.sessionId)?.pid === p.pid) readyPtys.delete(found.sessionId);
     });
-    readyPtys.set(found.sessionId, { pty: p, pid: p.pid ?? -1, cwd, lastActivity: Date.now() });
+    readyPtys.set(found.sessionId, {
+      pty: p,
+      pid: p.pid ?? -1,
+      cwd,
+      lastActivity: Date.now(),
+      buffer,
+      writeLock: new AsyncLock(),
+      subscribers,
+    });
 
     const outcome = await waitForTurnToFinish(found.file, found.sessionId, () => cancelled, retype);
     if (outcome === 'timeout') {
