@@ -11,6 +11,14 @@ export type Stage =
 
 export type ActionKind = 'approve' | 'question';
 
+/** Current + upcoming tasks, derived from the session's own TodoWrite/
+ *  TaskCreate/TaskUpdate tool calls — undefined for sessions that never used
+ *  one. Completed items are dropped; only what's happening now and next matters. */
+export interface TaskLine {
+  current: string | null;
+  upcoming: string[];
+}
+
 export interface AgentModel {
   sessionId: string;
   product: string;
@@ -31,12 +39,24 @@ export interface AgentModel {
   createdAt: number;
   queued: number;
   file: string;
+  taskLine?: TaskLine;
 }
 
 export interface Snapshot {
   type: 'snapshot';
   now: number;
   agents: AgentModel[];
+}
+
+/** 5h/7d rolling usage, estimated locally by the daemon (see server/src/usage.ts). */
+export interface LimitBar {
+  percent: number;
+  resetMs: number;
+}
+
+export interface Limits {
+  session: LimitBar | null;
+  weekly: LimitBar | null;
 }
 
 export interface AskOption {

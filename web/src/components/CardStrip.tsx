@@ -11,6 +11,8 @@ export function CardStrip({
   onSelect,
   nameOf,
   onHide,
+  onSpawn,
+  spawningProducts,
 }: {
   agents: AgentModel[];
   focusedId: string;
@@ -19,6 +21,8 @@ export function CardStrip({
   onSelect: (a: AgentModel) => void;
   nameOf: (a: AgentModel) => string;
   onHide: (sessionId: string) => void;
+  onSpawn: (product: string) => void;
+  spawningProducts: Set<string>;
 }) {
   return (
     <div className="strip">
@@ -40,6 +44,14 @@ export function CardStrip({
                 onHide={() => onHide(a.sessionId)}
               />
             ))}
+            <button
+              className="new-session-card"
+              disabled={spawningProducts.has(product)}
+              onClick={() => onSpawn(product)}
+              title={`Start a new session in ${product}`}
+            >
+              {spawningProducts.has(product) ? '…' : '+'}
+            </button>
           </div>
         </div>
       ))}

@@ -33,6 +33,10 @@ export function AgentCard({
   const cur = stageIndex(agent.stage);
   const ago = humAgo(now - agent.lastActivity);
   const name = displayName ?? agent.name;
+  // The current task from an explicit todo list, when the session tracks
+  // one, is more precise than the heuristic `status` gist — prefer it. No
+  // checkmarks/next here, card is too narrow; just the one line that matters.
+  const statusText = agent.taskLine?.current ?? agent.status;
 
   const cls = [
     'card',
@@ -99,9 +103,9 @@ export function AgentCard({
 
       <div
         className={`card__status${needs ? ' card__status--needs' : ''}${errored ? ' card__status--error' : ''}`}
-        title={agent.status}
+        title={statusText}
       >
-        {agent.status}
+        {statusText}
       </div>
     </div>
   );

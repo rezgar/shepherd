@@ -3,8 +3,24 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import chokidar from 'chokidar';
 import { scanAll, PROJECTS_DIR } from './scan.js';
 import { parseTranscript } from './transcript.js';
-import { sendToSession } from './sender.js';
+import { sendToSession, spawnSession, startIdleEvictionSweep, shutdownAllSessions } from './sender.js';
+import { computeLimits, type Limits } from './usage.js';
 import type { Snapshot } from './types.js';
+
+// This process serves every connected session, not just one — an uncaught
+// exception anywhere (a bad pty.spawn under load, a malformed transcript
+// line, anything) would otherwise take the WHOLE daemon down, silently
+// breaking every session's ability to send until someone notices and
+// restarts it by hand (confirmed the hard way: a spawn under heavy
+// concurrent load killed the process outright, and every send in every
+// session just stopped working with no visible error). Log and stay up —
+// a daemon that degrades on one bad event beats one that disappears entirely.
+process.on('uncaughtException', (err) => {
+  console.error('[shepherd] uncaught exception (daemon stays up):', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[shepherd] unhandled rejection (daemon stays up):', reason);
+});
 
 const PORT = 4177;
 
@@ -66,16 +82,47 @@ async function main() {
   }
 
   let current = snap;
+  let currentLimits: Limits | null = null;
   const wss = new WebSocketServer({ port: PORT });
   // In-flight sends this daemon spawned, by session id — lets Esc cancel one.
   const inFlight = new Map<string, { cancel: () => void }>();
   console.log(`[shepherd] ws://localhost:${PORT} — watching ${PROJECTS_DIR}`);
   console.log(`[shepherd] ${current.agents.length} agents at boot`);
 
+  startIdleEvictionSweep();
+  // Close every session's live PTY before exiting — otherwise a restart
+  // (including the supervisor's own auto-restart-on-crash) leaves orphaned
+  // `claude` processes behind instead of a clean handoff.
+  const shutdown = () => {
+    void shutdownAllSessions().finally(() => process.exit(0));
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
   const broadcast = () => {
     const data = JSON.stringify(current);
     for (const c of wss.clients) if (c.readyState === 1) c.send(data);
   };
+
+  const broadcastLimits = () => {
+    if (!currentLimits) return;
+    const data = JSON.stringify({ type: 'limits', ...currentLimits });
+    for (const c of wss.clients) if (c.readyState === 1) c.send(data);
+  };
+
+  // ccusage scans every local transcript, so it's not cheap enough to run on
+  // every rescan (400ms debounce) — a slow independent poll is plenty for a
+  // 5h/7d rolling estimate that barely moves minute to minute.
+  const refreshLimits = async () => {
+    try {
+      currentLimits = await computeLimits();
+      broadcastLimits();
+    } catch (e) {
+      console.error('[limits error]', e);
+    }
+  };
+  void refreshLimits();
+  setInterval(refreshLimits, 5 * 60_000);
 
   const LIMIT = 30;
   // Send a recent window of the focused transcript (fast first paint), or an
@@ -133,6 +180,7 @@ async function main() {
 
   wss.on('connection', (ws: FocusWs) => {
     ws.send(JSON.stringify(current));
+    if (currentLimits) ws.send(JSON.stringify({ type: 'limits', ...currentLimits }));
     ws.on('message', (buf) => {
       let m: any;
       try {
@@ -157,15 +205,19 @@ async function main() {
         ws.focusSubagentFile = undefined;
         ws.focusSubagentId = undefined;
       } else if (m.type === 'send' && m.sessionId && m.cwd && typeof m.text === 'string' && m.text.trim()) {
+        const targetFile = current.agents.find((a) => a.sessionId === m.sessionId)?.file;
+        if (!targetFile) return; // session not in the current snapshot — nothing to resume into
         if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'send-ack', sessionId: m.sessionId }));
         const handle = sendToSession(
           m.sessionId,
           m.cwd,
+          targetFile,
           m.text,
           Array.isArray(m.images) ? m.images : undefined,
-          () => {
+          (wasLiveElsewhere) => {
             inFlight.delete(m.sessionId);
-            if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'send-done', sessionId: m.sessionId }));
+            if (ws.readyState === 1)
+              ws.send(JSON.stringify({ type: 'send-done', sessionId: m.sessionId, wasLiveElsewhere }));
             void sendWindow(ws); // nudge a transcript refresh in case the file-watch is slow
           },
           (error) => {
@@ -181,6 +233,38 @@ async function main() {
         inFlight.set(m.sessionId, handle);
       } else if (m.type === 'cancel' && m.sessionId) {
         inFlight.get(m.sessionId)?.cancel();
+      } else if (m.type === 'spawn' && typeof m.product === 'string') {
+        // Any current session in that product names the repo root — a fresh
+        // session always lands there, never in a specific worktree.
+        const repoPath = current.agents.find((a) => a.product === m.product)?.repoPath;
+        if (!repoPath) {
+          if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'spawn-error', product: m.product, error: 'unknown product' }));
+          return;
+        }
+        // The session id isn't known until the SDK reports it mid-flight —
+        // register the handle in `inFlight` the moment it is, so the card
+        // that shows up for it is cancellable (Esc) just like any other
+        // Shepherd-owned send, not silently un-stoppable.
+        let spawnedId: string | null = null;
+        const handle = spawnSession(
+          repoPath,
+          'New session started via Shepherd. Say hi and wait for instructions.',
+          (sessionId) => {
+            spawnedId = sessionId;
+            inFlight.set(sessionId, handle);
+          },
+          () => {
+            if (spawnedId) inFlight.delete(spawnedId); // the new transcript file's own chokidar event drives the next broadcast
+          },
+          (error) => {
+            if (spawnedId) inFlight.delete(spawnedId);
+            console.error('[spawn error]', m.product, error);
+            if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'spawn-error', product: m.product, error }));
+          },
+          () => {
+            if (spawnedId) inFlight.delete(spawnedId);
+          },
+        );
       }
     });
   });

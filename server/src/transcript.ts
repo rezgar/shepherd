@@ -145,6 +145,10 @@ export async function parseTranscript(file: string, sessionId: string, limit = 8
   const dispatches = new Map<string, { description: string; ts: number; agentId?: string }>();
   const finishedAgentIds = new Set<string>();
 
+  // tool_use ids of AskUserQuestion calls — their tool_result is the human's
+  // actual answer, not noise, so it gets rendered (unlike every other tool_result).
+  const askIds = new Set<string>();
+
   // Read a point-in-time snapshot rather than streaming to EOF — the transcript
   // of a live session is appended to continuously, and a following stream would
   // never resolve while the agent is mid-response.
@@ -197,10 +201,36 @@ export async function parseTranscript(file: string, sessionId: string, limit = 8
         const agentId = o.toolUseResult?.agentId;
         const dispatch = agentId ? dispatches.get(toolResult.tool_use_id) : undefined;
         if (dispatch) dispatch.agentId = agentId;
+
+        // Every other tool_result is noise (file contents, command output) and
+        // gets dropped — but AskUserQuestion's tool_result IS the human's
+        // answer, so render it as a normal reply instead of losing it.
+        if (askIds.has(toolResult.tool_use_id)) {
+          const { text: rawText, images: inlineImages } = textAndImages(toolResult.content);
+          if (rawText.trim() || inlineImages.length) {
+            const { text, images: pastedImages } = await resolvePastedImages(rawText);
+            msgs.push({
+              id: o.uuid ?? `u${i++}`,
+              role: 'user',
+              text,
+              tools: [],
+              images: [...inlineImages, ...pastedImages],
+              ts,
+            });
+          }
+        }
         continue; // tool results arrive as "user" events — don't render them as user turns
       }
       const { text: rawText, images: inlineImages } = textAndImages(content);
       if (!rawText.trim() && !inlineImages.length) continue;
+      // Claude Code's own synthetic notice when a tool call (often this same
+      // AskUserQuestion, answered by typing instead of using the picker) was
+      // interrupted mid-flight — noise, not something the person said.
+      if (/^\[Request interrupted/.test(rawText.trim())) continue;
+      // Shepherd's own PTY driver types "/exit" to end a turn's session lease
+      // gracefully — this is the CLI's synthetic slash-command echo + its
+      // "Goodbye!" reply, never something the person actually said.
+      if (/^<(local-command|command-)/i.test(rawText.trim())) continue;
       const { text, images: pastedImages } = await resolvePastedImages(rawText);
       if (!text.trim() && !inlineImages.length && !pastedImages.length) continue;
       msgs.push({ id: o.uuid ?? `u${i++}`, role: 'user', text, tools: [], images: [...inlineImages, ...pastedImages], ts });
@@ -213,6 +243,7 @@ export async function parseTranscript(file: string, sessionId: string, limit = 8
         return { name, detail: toolDetail(name, c.input ?? {}), questions: extractQuestions(name, c.input ?? {}) };
       });
       for (const c of toolUses) {
+        if (c.id && String(c.name ?? '') === 'AskUserQuestion') askIds.add(c.id);
         if (!c.id || !isSubagentDispatch(String(c.name ?? ''))) continue;
         const description =
           typeof c.input?.description === 'string' && c.input.description.trim()

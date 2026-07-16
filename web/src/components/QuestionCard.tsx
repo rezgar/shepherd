@@ -89,10 +89,17 @@ export function QuestionCard({
         <div className="qcard__answer">
           <textarea
             className="qcard__comment"
-            placeholder="Add a comment, or type your own answer…"
+            placeholder="Add a comment, or type your own answer…   (Enter or Ctrl+Enter to send)"
             value={comment}
             rows={1}
             onChange={(e) => setComment(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && (e.ctrlKey || e.metaKey || !e.shiftKey)) {
+                e.preventDefault();
+                send();
+              }
+              // Shift+Enter falls through to the default → newline
+            }}
           />
           <button className="qcard__send" onClick={send} disabled={!canSend}>
             Send answer

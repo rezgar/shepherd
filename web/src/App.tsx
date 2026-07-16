@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useShepherd, useTick } from './api';
 import { ProjectLane } from './components/ProjectLane';
 import { FocusView } from './components/FocusView';
+import { LimitsTracker } from './components/LimitsTracker';
+import { ConnectionBanner } from './components/ConnectionBanner';
 import { groupByProduct } from './lib/format';
 import { playDone, playError, playNeedsYou, unlockAudio } from './lib/sound';
 import type { AgentModel, AgentState } from './types';
@@ -21,6 +23,7 @@ function load<T>(key: string, fallback: T): T {
 export function App() {
   const {
     snap,
+    limits,
     connected,
     focusedId,
     messages,
@@ -31,12 +34,24 @@ export function App() {
     send,
     cancel,
     sendingIds,
+    queueSend,
+    dequeueSend,
+    queuedMsgs,
+    forceSendQueued,
+    spawn,
+    spawningProducts,
     activeSubagents,
     openSubagent,
     closeSubagent,
     subagentModal,
+    liveElsewhereWarnings,
+    dismissLiveElsewhereWarning,
   } = useShepherd();
   const now = useTick(1000);
+  // Never resets once true — distinguishes "still starting up" (fine, just
+  // wait) from "was working, then the daemon died" (worth a restart button).
+  const everConnectedRef = useRef(false);
+  if (connected) everConnectedRef.current = true;
   const [windowH, setWindowH] = useState(4);
   const [fontSize, setFontSize] = useState<number>(() => load('shepherd:font', 14));
   const [renames, setRenames] = useState<Record<string, string>>(() => load('shepherd:names', {}));
@@ -140,9 +155,12 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [flatOrder, focus]);
 
+  const banner = !connected && <ConnectionBanner everConnected={everConnectedRef.current} />;
+
   if (!snap) {
     return (
       <div className="shell">
+        {banner}
         <div className="empty">{connected ? 'No sessions found.' : 'Connecting to shepherd daemon…'}</div>
       </div>
     );
@@ -152,29 +170,40 @@ export function App() {
 
   if (focused) {
     return (
-      <FocusView
-        agents={shownVisible}
-        focused={focused}
-        messages={messages}
-        hasMore={hasMore}
-        onLoadMore={loadMore}
-        now={now}
-        colorOf={colorOf}
-        nameOf={nameOf}
-        onSelect={(a) => focus(a.file, a.sessionId)}
-        onExit={unfocus}
-        onRename={rename}
-        fontSize={fontSize}
-        onFontSize={changeFont}
-        onSend={send}
-        sending={sendingIds.has(focused.sessionId)}
-        onCancel={cancel}
-        onHide={hide}
-        activeSubagents={activeSubagents}
-        onSelectSubagent={(s) => openSubagent(focused.file, focused.sessionId, s.agentId, s.description)}
-        onCloseSubagent={closeSubagent}
-        subagentModal={subagentModal}
-      />
+      <div className="focus-shell">
+        {banner}
+        <FocusView
+          agents={shownVisible}
+          focused={focused}
+          messages={messages}
+          hasMore={hasMore}
+          onLoadMore={loadMore}
+          now={now}
+          colorOf={colorOf}
+          nameOf={nameOf}
+          onSelect={(a) => focus(a.file, a.sessionId)}
+          onExit={unfocus}
+          onRename={rename}
+          fontSize={fontSize}
+          onFontSize={changeFont}
+          onSend={send}
+          sending={sendingIds.has(focused.sessionId)}
+          onCancel={cancel}
+          onHide={hide}
+          onSpawn={spawn}
+          spawningProducts={spawningProducts}
+          queued={queuedMsgs[focused.sessionId] ?? []}
+          onQueueSend={queueSend}
+          onDequeueSend={dequeueSend}
+          onForceSendQueued={forceSendQueued}
+          activeSubagents={activeSubagents}
+          onSelectSubagent={(s) => openSubagent(focused.file, focused.sessionId, s.agentId, s.description)}
+          onCloseSubagent={closeSubagent}
+          subagentModal={subagentModal}
+          liveElsewhereWarning={liveElsewhereWarnings.has(focused.sessionId)}
+          onDismissLiveElsewhereWarning={() => dismissLiveElsewhereWarning(focused.sessionId)}
+        />
+      </div>
     );
   }
 
@@ -184,6 +213,7 @@ export function App() {
 
   return (
     <div className="shell">
+      {banner}
       <header className="topbar">
         <span className="brand">🐑 Agent Shepherd</span>
         <span className="counts">
@@ -214,6 +244,7 @@ export function App() {
         <button className="mute-toggle" onClick={() => setMuted((m) => !m)} title={muted ? 'Unmute sounds' : 'Mute sounds'}>
           {muted ? '🔕' : '🔔'}
         </button>
+        <LimitsTracker limits={limits} />
         {hiddenVisible.length > 0 && (
           <button className="hidden-toggle" onClick={() => setShowHidden((s) => !s)}>
             {hiddenVisible.length} hidden {showHidden ? '▴' : '▾'}
@@ -233,6 +264,8 @@ export function App() {
             onSelect={(a) => focus(a.file, a.sessionId)}
             nameOf={nameOf}
             onHide={hide}
+            onSpawn={spawn}
+            spawningProducts={spawningProducts}
           />
         ))}
 

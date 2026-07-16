@@ -1,12 +1,36 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { AgentModel, ActionKind, AgentState, Stage } from './types.js';
+import type { AgentModel, ActionKind, AgentState, Stage, TaskLine } from './types.js';
 import type { HookState } from './hookState.js';
 
 /** Recent activity within this window ⇒ the agent is actively working. */
 const ACTIVE_WINDOW_MS = 60_000;
 /** Past this, even an unfinished turn is treated as parked (agent likely gone). */
 const STALE_MS = 10 * 60_000;
+/** How long a hook-reported "working" is trusted without a follow-up hook
+ *  event (PreToolUse/PostToolUse tick it forward during real work; Stop
+ *  clears it on a normal finish). A user-interrupted turn doesn't reliably
+ *  fire Stop, so without this the card would show "working" — wrongly — for
+ *  the full 15-minute hook-state retention window. Real single-tool calls
+ *  essentially never run this long between hook events, so this is safe to
+ *  keep much tighter than that outer retention window. */
+const WORKING_HOOK_TRUST_MS = 3 * 60_000;
+/** Grace period after the transcript's own last event is already a
+ *  *complete* assistant turn (no pending tool_use) before a hook-reported
+ *  "working" gets overridden — covers the CLI's brief "running stop hooks"
+ *  cleanup phase right after the visible response finishes generating.
+ *  Much shorter than WORKING_HOOK_TRUST_MS because this isn't a timeout
+ *  guess: a finished turn in the transcript is direct, unambiguous proof
+ *  the turn is over, independent of whether Stop ever fires at all. */
+const STOP_HOOK_GRACE_MS = 12_000;
+/** How long a still-pending tool call in an auto-approving mode is assumed
+ *  to still be running, absent any hook confirming it. PreToolUse only fires
+ *  once at the start of a tool call — there's no heartbeat while it runs —
+ *  so a genuinely long-running tool and a process that died mid-call look
+ *  identical from here. This caps the benefit of the doubt well under the
+ *  10-minute STALE_MS used elsewhere, matching the common explicit Bash-tool
+ *  timeout (5m) seen in practice. */
+const PENDING_TOOL_STALE_MS = 5 * 60_000;
 
 /** Strip a worktree suffix to find the owning repo. */
 export function deriveProduct(cwd: string): { product: string; repoPath: string; label: string } {
@@ -50,8 +74,90 @@ function toolDetail(name: string, input: Record<string, unknown>): string {
   return '';
 }
 
+/** The first question's own text, for a status line that reads better than a
+ *  generic "wants: to run a tool". */
+function askUserQuestionSummary(input: Record<string, unknown>): string {
+  const questions = (input as any).questions;
+  const first = Array.isArray(questions) ? questions[0] : undefined;
+  const text = typeof first?.question === 'string' ? first.question : '';
+  return text ? gist(text, 200) : 'has a question for you';
+}
+
 function isSubagentDispatch(name: string): boolean {
   return /task|agent/i.test(name);
+}
+
+// --- task/todo tracking -------------------------------------------------
+// Sessions track their own checklist via one of two tool families, depending
+// on Claude Code version: the classic `TodoWrite` (whole list replaced each
+// call) or the newer `TaskCreate`/`TaskUpdate` (tasks created in bulk, then
+// patched one at a time by a 1-based `taskId` matching creation order — the
+// id isn't in the tool_use input, only in its tool_result text, so we infer
+// it positionally instead of parsing that text).
+
+interface TaskItem {
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+}
+
+function normalizeTaskStatus(s: unknown): TaskItem['status'] {
+  return s === 'in_progress' || s === 'completed' ? s : 'pending';
+}
+
+function applyTaskTool(name: string, input: Record<string, unknown>, items: TaskItem[]): TaskItem[] {
+  if (name === 'TodoWrite') {
+    const todos = (input as any).todos;
+    if (!Array.isArray(todos)) return items;
+    return todos
+      .filter((t: any) => t && typeof t.content === 'string')
+      .map((t: any) => ({ content: t.content, status: normalizeTaskStatus(t.status) }));
+  }
+  if (name === 'TaskCreate') {
+    const raw = (input as any).tasks;
+    let created: any[] = [];
+    if (typeof raw === 'string') {
+      try {
+        created = JSON.parse(raw);
+      } catch {
+        created = [];
+      }
+    } else if (Array.isArray(raw)) {
+      created = raw;
+    } else if (typeof (input as any).subject === 'string') {
+      created = [{ content: (input as any).subject, status: 'pending' }];
+    }
+    if (!created.length) return items;
+    const next = [...items];
+    for (const t of created) {
+      const content = typeof t?.content === 'string' ? t.content : typeof t?.subject === 'string' ? t.subject : null;
+      if (!content) continue;
+      next.push({ content, status: normalizeTaskStatus(t?.status) });
+    }
+    return next;
+  }
+  if (name === 'TaskUpdate') {
+    const idx = Number((input as any).taskId) - 1;
+    if (!Number.isInteger(idx) || idx < 0 || idx >= items.length) return items;
+    const next = [...items];
+    const cur = { ...next[idx] };
+    if (typeof (input as any).subject === 'string') cur.content = (input as any).subject;
+    if (typeof (input as any).status === 'string') cur.status = normalizeTaskStatus((input as any).status);
+    next[idx] = cur;
+    return next;
+  }
+  return items;
+}
+
+/** The in-progress task + every still-pending one after it, in order — the
+ *  compact "current/upcoming" line shown on cards and in focus. Completed
+ *  items carry no forward-looking information, so they're dropped entirely. */
+function computeTaskLine(items: TaskItem[]): TaskLine | undefined {
+  if (!items.length) return undefined;
+  const currentIdx = items.findIndex((t) => t.status === 'in_progress');
+  const current = currentIdx >= 0 ? items[currentIdx].content : null;
+  const searchFrom = currentIdx >= 0 ? currentIdx + 1 : 0;
+  const upcoming = items.slice(searchFrom).filter((t) => t.status === 'pending').map((t) => t.content);
+  return { current, upcoming };
 }
 
 const CONTINUATION_WORDS = new Set([
@@ -137,6 +243,7 @@ export async function parseSession(
   let lastTaskText = '';
   let lastEventKind = '';
   const stageSignals: Stage[] = [];
+  let taskItems: TaskItem[] = [];
 
   // Snapshot read (not a streaming follow) so a live, growing transcript can't
   // stall the scan.
@@ -180,10 +287,20 @@ export async function parseSession(
         else queued = Math.max(0, queued - 1);
         break;
       case 'user': {
+        // A subagent's completion notice, delivered as a "user" event — not
+        // something the person said, never a task/status source. Same check
+        // transcript.ts uses to keep it out of the rendered chat.
+        if (o.origin?.kind === 'task-notification') break;
         const content = o.message?.content;
         const hasToolResult =
           Array.isArray(content) && content.some((c: any) => c?.type === 'tool_result');
         const txt = textOf(content);
+        const trimmed = txt.trim();
+        // Claude Code's own synthetic notice when a tool call was interrupted
+        // mid-flight, or the slash-command echo Shepherd's PTY driver types to
+        // close out a turn (and its "Goodbye!" reply) — neither is something
+        // the person said, never a task/status source.
+        if (/^\[Request interrupted/i.test(trimmed) || /^<(local-command|command-)/i.test(trimmed)) break;
         if (hasToolResult) {
           lastEventKind = 'tool_result';
         } else if (txt.trim()) {
@@ -214,6 +331,9 @@ export async function parseSession(
           lastToolInput = (last.input ?? {}) as Record<string, unknown>;
           for (const c of tools) {
             const name = String(c.name ?? '');
+            if (name === 'TodoWrite' || name === 'TaskCreate' || name === 'TaskUpdate') {
+              taskItems = applyTaskTool(name, (c.input ?? {}) as Record<string, unknown>, taskItems);
+            }
             const input = JSON.stringify(c.input ?? {}).toLowerCase();
             if (/edit|write/i.test(name)) stageSignals.push('implementation');
             else if (/read|grep|glob/i.test(name)) stageSignals.push('planning');
@@ -248,26 +368,55 @@ export async function parseSession(
   const finishedTurn = lastEventKind === 'assistant' && lastAssistantStop !== 'tool_use';
   const wantsTool = lastEventKind === 'assistant' && lastAssistantStop === 'tool_use';
   const endsWithQuestion = /\?["')\]]*\s*$/.test(lastAssistantText);
+  // AskUserQuestion always genuinely blocks on a human, in EVERY permission
+  // mode — unlike every other tool, `--dangerously-skip-permissions` doesn't
+  // (can't) auto-answer it. Confirmed the hard way: under bypass permissions
+  // the generic "pending tool call" branches below classify a stuck question
+  // as ordinary auto-approved "working" activity, so the card just reads
+  // "thinking…" — nothing ever flags that it's actually waiting on you,
+  // indistinguishable from genuinely idle unless you go check the terminal.
+  const pendingQuestion = wantsTool && lastToolName === 'AskUserQuestion';
 
   // The card's status while working: the task you gave it (the last substantive
   // instruction), gisted — one altitude below `stage`. Falls back to narration
   // then a placeholder. Granular tool activity goes to `activity` instead.
   const taskStatus = gist(lastTaskText || lastUserText, 200) || gist(lastAssistantText, 200) || 'working…';
 
-  if (hook?.state === 'error') {
+  // A hook-reported "working" is overridden in three cases: (1) it's simply
+  // stale with no follow-up event (Stop doesn't reliably fire on interrupt),
+  // (2) — the precise, non-timeout-guess case — the transcript's own last
+  // event is ALREADY a complete assistant turn (Claude Code always writes
+  // that reliably even when the Stop hook itself lags or never fires at
+  // all), or (3) the transcript shows a pending AskUserQuestion — the CLI
+  // cannot simultaneously be "working" and blocked on a question, so a
+  // "working" hook here is definitely stale, not just possibly so.
+  const hookStale = !!hook && now - hook.ts > WORKING_HOOK_TRUST_MS;
+  const transcriptAlreadyFinished = finishedTurn && idleMs > STOP_HOOK_GRACE_MS;
+  const trustedHook =
+    hook?.state === 'working' && (hookStale || transcriptAlreadyFinished || pendingQuestion) ? undefined : hook;
+
+  if (pendingQuestion) {
+    // Ground truth from the transcript itself, ahead of every hook-based
+    // branch below: a complete assistant turn ending in an AskUserQuestion
+    // tool_use is unambiguous proof it's blocked waiting on you, in any
+    // permission mode, hook or no hook.
+    state = 'needs-you';
+    action = 'question';
+    status = askUserQuestionSummary(lastToolInput);
+  } else if (trustedHook?.state === 'error') {
     // exact: StopFailure fired — the session terminated on a rate limit / API / billing error
     state = 'error';
-    status = errorStatus(hook.errorType);
-  } else if (hook?.state === 'working') {
+    status = errorStatus(trustedHook.errorType);
+  } else if (trustedHook?.state === 'working') {
     // exact: Claude Code told us it's running (incl. while subagents work)
     state = 'working';
     activity = lastToolName
       ? workingStatus(lastToolName, lastToolInput)
-      : hook.tool
-        ? `running ${hook.tool}`
+      : trustedHook.tool
+        ? `running ${trustedHook.tool}`
         : gist(lastAssistantText, 200) || 'thinking…';
     status = taskStatus;
-  } else if (hook?.state === 'needs-you') {
+  } else if (trustedHook?.state === 'needs-you') {
     // exact: a Notification fired — it wants your attention
     state = 'needs-you';
     if (endsWithQuestion) {
@@ -280,7 +429,7 @@ export async function parseSession(
         ? `wants: ${d ? gist(d, 160) : toolDetail(lastToolName, lastToolInput) || 'to run a tool'}`
         : 'needs your attention';
     }
-  } else if (hook?.state === 'idle') {
+  } else if (trustedHook?.state === 'idle') {
     // exact: the turn stopped — but a trailing question still needs you
     if (endsWithQuestion && idleMs < STALE_MS) {
       state = 'needs-you';
@@ -300,13 +449,19 @@ export async function parseSession(
     state = 'needs-you';
     action = 'question';
     status = gist(lastAssistantText, 200);
-  } else if (wantsTool && autoRuns && idleMs < STALE_MS) {
+  } else if (wantsTool && autoRuns && idleMs < PENDING_TOOL_STALE_MS) {
     // executing a tool (including a subagent) in an auto-approving mode — the
     // session is still running even if it hasn't written for a while.
     state = 'working';
     activity = workingStatus(lastToolName, lastToolInput);
     status = taskStatus;
-  } else if (activelyRunning && lastEventKind !== 'user') {
+  } else if (activelyRunning && lastEventKind !== 'user' && !finishedTurn) {
+    // Recent assistant/tool activity that ISN'T a completed turn — e.g.
+    // between a tool dispatch and its result. A *finished* turn (full text,
+    // stop_reason already written) is excluded here even if it just
+    // happened: Claude Code only writes a complete message object, never a
+    // partial one, so seeing `stop_reason` at all means there's nothing left
+    // to stream — recency alone doesn't make a finished turn "working".
     state = 'working';
     activity = workingStatus(lastToolName, lastToolInput);
     status = taskStatus;
@@ -337,5 +492,6 @@ export async function parseSession(
     createdAt: firstTs || lastTs,
     queued,
     file,
+    taskLine: computeTaskLine(taskItems),
   };
 }
