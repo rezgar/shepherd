@@ -4,6 +4,7 @@ import { ProjectLane } from './components/ProjectLane';
 import { FocusView } from './components/FocusView';
 import { LimitsTracker } from './components/LimitsTracker';
 import { ConnectionBanner } from './components/ConnectionBanner';
+import { NewProjectModal } from './components/NewProjectModal';
 import { groupByProduct } from './lib/format';
 import { playDone, playError, playNeedsYou, unlockAudio } from './lib/sound';
 import type { AgentModel, AgentState } from './types';
@@ -38,6 +39,10 @@ export function App() {
     sendTerminalKey,
     spawn,
     spawningProducts,
+    spawnErrors,
+    dirListing,
+    dirListingError,
+    listDir,
     activeSubagents,
     openSubagent,
     closeSubagent,
@@ -54,6 +59,7 @@ export function App() {
   const [hidden, setHidden] = useState<Record<string, true>>(() => load('shepherd:hidden', {}));
   const [showHidden, setShowHidden] = useState(false);
   const [muted, setMuted] = useState<boolean>(() => load('shepherd:muted', false));
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
 
   useEffect(() => {
     localStorage.setItem('shepherd:font', JSON.stringify(fontSize));
@@ -233,6 +239,9 @@ export function App() {
             ))}
           </select>
         </label>
+        <button className="new-project-btn" onClick={() => setNewProjectOpen(true)} title="Start a session in a new project directory">
+          + new project
+        </button>
         <button className="mute-toggle" onClick={() => setMuted((m) => !m)} title={muted ? 'Unmute sounds' : 'Mute sounds'}>
           {muted ? '🔕' : '🔔'}
         </button>
@@ -278,6 +287,22 @@ export function App() {
           </div>
         )}
       </main>
+
+      {newProjectOpen && (
+        <NewProjectModal
+          dirListing={dirListing}
+          dirListingError={dirListingError}
+          onListDir={listDir}
+          onSpawn={spawn}
+          onClose={() => setNewProjectOpen(false)}
+          agents={snap.agents}
+          spawnErrors={spawnErrors}
+          onFocus={(file, sessionId) => {
+            setNewProjectOpen(false);
+            focus(file, sessionId);
+          }}
+        />
+      )}
     </div>
   );
 }

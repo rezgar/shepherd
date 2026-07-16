@@ -1093,6 +1093,104 @@ body {
   flex-direction: column;
 }
 
+/* ---- new project (directory picker) ---- */
+.new-project-btn {
+  background: transparent;
+  border: 1px dashed #30363d;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+.new-project-btn:hover {
+  border-color: #58a6ff;
+  color: #58a6ff;
+}
+.newproject-modal {
+  height: min(560px, 80vh);
+}
+.newproject-modal__body {
+  padding: 12px 16px;
+  gap: 10px;
+  overflow: hidden;
+}
+.newproject-modal__path {
+  font-family: var(--mono, monospace);
+  font-size: 12.5px;
+  color: var(--muted);
+  word-break: break-all;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--line);
+}
+.newproject-modal__list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.newproject-modal__entry {
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.newproject-modal__entry:hover {
+  background: #161b22;
+}
+.newproject-modal__entry--up {
+  color: var(--muted);
+}
+.newproject-modal__empty {
+  color: var(--muted);
+  font-size: 12.5px;
+  padding: 6px 8px;
+}
+.newproject-modal__confirm {
+  background: #1f6feb;
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  font-weight: 600;
+  padding: 9px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.newproject-modal__confirm:hover {
+  background: #388bfd;
+}
+.newproject-modal__status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  gap: 10px;
+  color: var(--muted);
+  text-align: center;
+  padding: 24px;
+}
+.newproject-modal__spinner {
+  font-size: 20px;
+}
+.newproject-modal__error {
+  color: #f85149;
+  font-size: 13px;
+}
+.newproject-modal__retry {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
 /* chat font size is user-adjustable (--chat-font set on .focus) — still
    used by ChatTranscript/QuestionCard inside the read-only subagent modal */
 .focus .md {

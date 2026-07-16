@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ChatMsg, Limits, Snapshot, SubagentInfo } from './types';
+import type { ChatMsg, DirListing, Limits, Snapshot, SubagentInfo } from './types';
 
 const WS_URL = 'ws://localhost:4177';
 
@@ -48,10 +48,21 @@ export interface Shepherd {
    *  was thrown away). Returns an unsubscribe function. */
   subscribeTerminal: (onChunk: (chunk: string) => void) => () => void;
   termError: string | null;
-  /** Ask the daemon to spawn a fresh session in this product's repo root. */
-  spawn: (product: string) => void;
+  /** Ask the daemon to spawn a fresh session. `cwd` is required for a brand
+   *  new product with no existing card to derive a repo root from — omit it
+   *  to reuse an already-known product's repo root. */
+  spawn: (product: string, cwd?: string) => void;
   /** Products with a spawn request still in flight — shows "spawning…" on the + card. */
   spawningProducts: Set<string>;
+  /** Most recent spawn failure per product, if any — cleared on retry. */
+  spawnErrors: Map<string, string>;
+  /** Latest directory listing for the new-project picker, or null before the
+   *  first request / after an error. */
+  dirListing: DirListing | null;
+  dirListingError: string | null;
+  /** Ask the daemon to list subdirectories of `path` (or a sensible default
+   *  root when omitted) for the new-project picker. */
+  listDir: (path?: string) => void;
   /** Subagents the focused session dispatched that haven't finished yet. */
   activeSubagents: SubagentInfo[];
   openSubagent: (parentFile: string, sessionId: string, agentId: string, description: string) => void;
@@ -109,6 +120,9 @@ export function useShepherd(): Shepherd {
   // product -> request timestamp, cleared once a fresher session shows up in
   // that group's snapshot, on a spawn-error, or after a safety timeout.
   const [spawning, setSpawning] = useState<Map<string, number>>(() => new Map());
+  const [spawnErrors, setSpawnErrors] = useState<Map<string, string>>(() => new Map());
+  const [dirListing, setDirListing] = useState<DirListing | null>(null);
+  const [dirListingError, setDirListingError] = useState<string | null>(null);
   const [subagentModal, setSubagentModal] = useState<{
     agentId: string;
     description: string;
@@ -175,6 +189,12 @@ export function useShepherd(): Shepherd {
             n.delete(d.product);
             return n;
           });
+          setSpawnErrors((s) => new Map(s).set(d.product, d.error));
+        } else if (d.type === 'dirListing') {
+          setDirListing({ path: d.path, parent: d.parent, entries: d.entries });
+          setDirListingError(null);
+        } else if (d.type === 'dirListing-error') {
+          setDirListingError(d.error);
         } else if (d.type === 'limits') {
           setLimits({ session: d.session ?? null, weekly: d.weekly ?? null });
         } else if (d.type === 'transcript') {
@@ -286,10 +306,16 @@ export function useShepherd(): Shepherd {
     wsSend(wsRef.current, { type: 'termKey', sessionId, cwd, key });
   }, []);
 
-  const spawn = useCallback((product: string) => {
+  const spawn = useCallback((product: string, cwd?: string) => {
     const since = Date.now();
-    wsSend(wsRef.current, { type: 'spawn', product });
+    wsSend(wsRef.current, { type: 'spawn', product, cwd });
     setSpawning((s) => new Map(s).set(product, since));
+    setSpawnErrors((s) => {
+      if (!s.has(product)) return s;
+      const n = new Map(s);
+      n.delete(product);
+      return n;
+    });
     // Safety net — if neither a fresh session nor a spawn-error ever arrives
     // (daemon restart mid-flight, etc.), don't leave the card stuck forever.
     setTimeout(() => {
@@ -300,6 +326,10 @@ export function useShepherd(): Shepherd {
         return n;
       });
     }, 25_000);
+  }, []);
+
+  const listDir = useCallback((path?: string) => {
+    wsSend(wsRef.current, { type: 'listDir', path });
   }, []);
 
   // Only ever surface the transcript that matches the focused session — a previous
@@ -326,6 +356,10 @@ export function useShepherd(): Shepherd {
     subscribeTerminal,
     spawn,
     spawningProducts: new Set(spawning.keys()),
+    spawnErrors,
+    dirListing,
+    dirListingError,
+    listDir,
     activeSubagents,
     openSubagent,
     closeSubagent,

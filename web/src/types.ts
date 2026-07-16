@@ -102,3 +102,12 @@ export interface Transcript {
   messages: ChatMsg[];
   activeSubagents: SubagentInfo[];
 }
+
+/** One level of the directory picker used to start a session in a brand
+ *  new project that has no existing card to spawn from. */
+export interface DirListing {
+  path: string;
+  /** '' means "go up to the drive list" (Windows only); null means already at the top. */
+  parent: string | null;
+  entries: { name: string }[];
+}

@@ -101,6 +101,29 @@ const FIND_NEW_SESSION_TIMEOUT_MS = 90_000;
  *  lost, since ground truth always lives in its transcript file. */
 const IDLE_EVICT_MS = 30 * 60_000;
 const EVICT_SWEEP_MS = 5 * 60_000;
+/** Gap between clearing the input line, typing text, and pressing Enter —
+ *  each as its OWN `write()` call rather than one concatenated burst.
+ *  Confirmed the hard way: writing `` `${text}\r` `` in a single call gets
+ *  swallowed by the CLI's paste-burst detection (added in a recent Claude
+ *  Code version) — the text lands in the input box but the trailing \r
+ *  never registers as Enter, so nothing is ever submitted, silently, with
+ *  no error anywhere. A newer CLI version apparently now treats a big burst
+ *  of bytes arriving in one read() as pasted text and refuses to let an
+ *  embedded \r submit it. Splitting into separate writes with a short gap
+ *  reproduces how a human actually types and reliably submits instead. */
+const TYPE_GAP_MS = 80;
+
+/** Type a line into a PTY's input box and submit it — clear whatever's
+ *  there first (see writeTermInput's doc comment for why it isn't always
+ *  empty), then the text, then Enter, each a separate write with a gap.
+ *  See TYPE_GAP_MS for why this can't be one concatenated write. */
+async function typeLine(p: IPty, text: string): Promise<void> {
+  p.write('\x01\x0b');
+  await new Promise((r) => setTimeout(r, TYPE_GAP_MS));
+  p.write(text);
+  await new Promise((r) => setTimeout(r, TYPE_GAP_MS));
+  p.write('\r');
+}
 
 /** Caps how much raw PTY output a session's ring buffer retains for replay
  *  on attach/reconnect — big enough to redraw a full screen plus some
@@ -214,6 +237,32 @@ const readyPtys = new Map<string, PersistentPty>();
  *  not-yet-open session so two rapid-fire messages don't each spawn their
  *  own process and fight over which one is "the" session PTY. */
 const spawning = new Map<string, Promise<PersistentPty>>();
+/** Normalized (lowercase, forward-slash) cwds an in-flight spawnSession()
+ *  call currently owns a live PTY for, but hasn't yet registered under its
+ *  real session id in `readyPtys` — see the matching wait loop in
+ *  getOrSpawnPty. Keyed by cwd, known from the moment spawnSession's PTY is
+ *  spawned, rather than by session id: confirmed the hard way that Claude
+ *  Code creates a session's transcript file (and so reveals its session id
+ *  to chokidar's watcher, and thus to any client that discovers and
+ *  auto-attaches to it) at process startup, WELL BEFORE spawnSession's own
+ *  quiet-wait + kickoff-typing + polling loop ever learns that id itself —
+ *  a session-id-keyed ownership claim registers far too late to close that
+ *  gap. A client attaching in that window can otherwise beat spawnSession
+ *  to getOrSpawnPty, spawning a second, colliding `--resume` process for
+ *  the exact same session (see isSessionLiveElsewhere's doc comment for
+ *  what that collision looks like in practice). */
+const spawnSessionOwnershipByCwd = new Set<string>();
+/** How long getOrSpawnPty will wait for an in-flight spawnSession() to
+ *  finish registering before giving up and spawning its own PTY — generous
+ *  because it covers spawnSession's ENTIRE startup window (spawn, quiet
+ *  wait, kickoff typing, polling for the session file), not just a short
+ *  polling interval; see READY_MAX_WAIT_MS and FIND_NEW_SESSION_TIMEOUT_MS
+ *  for why that can legitimately run to tens of seconds under load. */
+const NEW_SESSION_REGISTRATION_GRACE_MS = 90_000;
+
+function normCwdKey(cwd: string): string {
+  return cwd.replace(/\\/g, '/').toLowerCase();
+}
 
 async function spawnPersistent(sessionId: string, cwd: string): Promise<PersistentPty> {
   // pty.spawn can throw synchronously (seen under heavy concurrent load —
@@ -258,6 +307,23 @@ async function getOrSpawnPty(sessionId: string, cwd: string): Promise<Persistent
   }
   const already = spawning.get(sessionId);
   if (already) return already;
+
+  // See spawnSessionOwnershipByCwd's doc comment — an in-flight
+  // spawnSession() may already own a live PTY for this exact cwd and just
+  // hasn't learned this session's id (or registered it here) yet. Wait for
+  // it rather than spawning a colliding duplicate.
+  const cwdKey = normCwdKey(cwd);
+  if (spawnSessionOwnershipByCwd.has(cwdKey)) {
+    for (let waited = 0; waited < NEW_SESSION_REGISTRATION_GRACE_MS; waited += 150) {
+      await new Promise((r) => setTimeout(r, 150));
+      const nowReady = readyPtys.get(sessionId);
+      if (nowReady) {
+        nowReady.lastActivity = Date.now();
+        return nowReady;
+      }
+      if (!spawnSessionOwnershipByCwd.has(cwdKey)) break; // spawnSession gave up (or claimed a different session) — fall through
+    }
+  }
 
   const p = spawnPersistent(sessionId, cwd);
   spawning.set(sessionId, p);
@@ -317,10 +383,7 @@ export async function writeTermInput(
   const entry = await getOrSpawnPty(sessionId, cwd);
   entry.lastActivity = Date.now();
   const fullText = withImageNotes(text, sessionId, images);
-  await entry.writeLock.run(async () => {
-    entry.pty.write('\x01\x0b');
-    entry.pty.write(`${fullText}\r`);
-  });
+  await entry.writeLock.run(() => typeLine(entry.pty, fullText));
 }
 
 /** Resize a session's PTY to match its terminal panel's actual size. */
@@ -569,107 +632,118 @@ export function spawnSession(
       return;
     }
     ptyRef = p;
-    const idleFor = drainAndTrack(p);
-    if (cancelled) {
-      onCancelled();
-      try {
-        p.kill();
-      } catch {
-        /* already dead */
-      }
-      return;
-    }
-
-    const before = new Set<string>();
+    // Claimed the instant the process exists, NOT once its session id is
+    // known — see spawnSessionOwnershipByCwd's doc comment for why the
+    // session id alone is too late to close the race this guards against.
+    // Cleared in the finally below on every exit path.
+    const cwdKey = normCwdKey(cwd);
+    spawnSessionOwnershipByCwd.add(cwdKey);
     try {
-      const projectDir = path.join(PROJECTS_DIR, cwd.replace(/[:\\/]/g, '-'));
-      for (const name of await readdir(projectDir)) {
-        if (name.endsWith('.jsonl')) before.add(path.join(projectDir, name));
+      const idleFor = drainAndTrack(p);
+      if (cancelled) {
+        onCancelled();
+        try {
+          p.kill();
+        } catch {
+          /* already dead */
+        }
+        return;
       }
-    } catch {
-      /* project directory doesn't exist yet — fine, every .jsonl found later is new */
-    }
 
-    await waitForPtyQuiet(idleFor);
-    // Clear the input line first — see the matching comment in sendToSession
-    // for why it isn't always empty; a harmless no-op on this first attempt.
-    const typeKickoff = () => {
-      p.write('\x01\x0b');
-      p.write(`${kickoffText}\r`);
-    };
-    try {
-      typeKickoff();
-    } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
-      return;
-    }
-    // Later retries (see KICKOFF_RETRY_MS) are best-effort — if the PTY has
-    // since died, findNewSessionFile's own timeout reports that, so a
-    // failed retry write just needs to not throw uncaught here.
-    const retype = () => {
+      const before = new Set<string>();
       try {
-        typeKickoff();
+        const projectDir = path.join(PROJECTS_DIR, cwd.replace(/[:\\/]/g, '-'));
+        for (const name of await readdir(projectDir)) {
+          if (name.endsWith('.jsonl')) before.add(path.join(projectDir, name));
+        }
       } catch {
-        /* already dead — findNewSessionFile's own polling will time out */
+        /* project directory doesn't exist yet — fine, every .jsonl found later is new */
       }
-    };
 
-    const found = await findNewSessionFile(cwd, before, () => cancelled, retype);
-    if (found) onSessionId(found.sessionId);
-
-    if (!found) {
-      // Couldn't identify the new session's file within the deadline — we
-      // have zero confirmation the kickoff was ever actually submitted, so
-      // typing `/exit` here is unsafe: found the hard way that doing this
-      // blindly landed graceful-exit keystrokes in a still-open input box
-      // and merged them with the original text. With no known-good state to
-      // exit gracefully from, killing outright is the safer failure mode —
-      // the card itself still appears independently via the daemon's own
-      // transcript watch if the session did eventually get created.
+      await waitForPtyQuiet(idleFor);
+      // Clear the input line first — see the matching comment on writeTermInput
+      // for why it isn't always empty; a harmless no-op on this first attempt.
       try {
-        p.kill();
-      } catch {
-        /* already dead */
+        await typeLine(p, kickoffText);
+      } catch (e) {
+        onError(e instanceof Error ? e.message : String(e));
+        return;
       }
-      onError('could not confirm the new session was created within the deadline');
-      return;
-    }
+      // Later retries (see KICKOFF_RETRY_MS) are best-effort — if the PTY has
+      // since died, findNewSessionFile's own timeout reports that, so a
+      // failed retry write just needs to not throw uncaught here.
+      const retype = async () => {
+        try {
+          await typeLine(p, kickoffText);
+        } catch {
+          /* already dead — findNewSessionFile's own polling will time out */
+        }
+      };
 
-    // From here on, this IS the session's live PTY — register it so every
-    // future send reuses this same process instead of spawning a fresh one,
-    // exactly like staying in the terminal window you just opened.
-    const buffer = new RingBuffer(RING_BUFFER_CAP_BYTES);
-    const subscribers = new Set<FocusWsLike>();
-    p.onData((chunk: string) => {
-      buffer.push(Buffer.from(chunk, 'utf8'));
-      for (const sub of subscribers) {
-        if (sub.readyState === 1) sub.send(JSON.stringify({ type: 'termOutput', sessionId: found.sessionId, chunk }));
+      const found = await findNewSessionFile(cwd, before, () => cancelled, retype);
+      if (found) onSessionId(found.sessionId);
+
+      if (!found) {
+        // Couldn't identify the new session's file within the deadline — we
+        // have zero confirmation the kickoff was ever actually submitted, so
+        // typing `/exit` here is unsafe: found the hard way that doing this
+        // blindly landed graceful-exit keystrokes in a still-open input box
+        // and merged them with the original text. With no known-good state to
+        // exit gracefully from, killing outright is the safer failure mode —
+        // the card itself still appears independently via the daemon's own
+        // transcript watch if the session did eventually get created.
+        try {
+          p.kill();
+        } catch {
+          /* already dead */
+        }
+        onError('could not confirm the new session was created within the deadline');
+        return;
       }
-    });
-    p.onExit(() => {
-      if (readyPtys.get(found.sessionId)?.pid === p.pid) readyPtys.delete(found.sessionId);
-    });
-    readyPtys.set(found.sessionId, {
-      pty: p,
-      pid: p.pid ?? -1,
-      cwd,
-      lastActivity: Date.now(),
-      buffer,
-      writeLock: new AsyncLock(),
-      subscribers,
-    });
 
-    const outcome = await waitForTurnToFinish(found.file, found.sessionId, () => cancelled, retype);
-    if (outcome === 'timeout') {
-      onError('session did not respond in time — it may be slow to start, or under heavy load');
-      return;
+      // From here on, this IS the session's live PTY — register it so every
+      // future send reuses this same process instead of spawning a fresh one,
+      // exactly like staying in the terminal window you just opened.
+      const buffer = new RingBuffer(RING_BUFFER_CAP_BYTES);
+      const subscribers = new Set<FocusWsLike>();
+      p.onData((chunk: string) => {
+        buffer.push(Buffer.from(chunk, 'utf8'));
+        for (const sub of subscribers) {
+          if (sub.readyState === 1) sub.send(JSON.stringify({ type: 'termOutput', sessionId: found.sessionId, chunk }));
+        }
+      });
+      p.onExit(() => {
+        if (readyPtys.get(found.sessionId)?.pid === p.pid) readyPtys.delete(found.sessionId);
+      });
+      readyPtys.set(found.sessionId, {
+        pty: p,
+        pid: p.pid ?? -1,
+        cwd,
+        lastActivity: Date.now(),
+        buffer,
+        writeLock: new AsyncLock(),
+        subscribers,
+      });
+      // Registered under its real session id now — safe to drop the cwd
+      // claim early instead of waiting for the whole finally block below,
+      // which won't run until waitForTurnToFinish's own (potentially
+      // minutes-long) wait completes.
+      spawnSessionOwnershipByCwd.delete(cwdKey);
+
+      const outcome = await waitForTurnToFinish(found.file, found.sessionId, () => cancelled, retype);
+      if (outcome === 'timeout') {
+        onError('session did not respond in time — it may be slow to start, or under heavy load');
+        return;
+      }
+      if (outcome === 'cancelled') {
+        onCancelled();
+        return;
+      }
+      if (outcome === 'error') onError('session reported an error');
+      else onDone();
+    } finally {
+      spawnSessionOwnershipByCwd.delete(cwdKey);
     }
-    if (outcome === 'cancelled') {
-      onCancelled();
-      return;
-    }
-    if (outcome === 'error') onError('session reported an error');
-    else onDone();
   })();
 
   return handle;
@@ -717,7 +791,7 @@ async function findNewSessionFile(
   cwd: string,
   before: Set<string>,
   isCancelled: () => boolean,
-  retype: () => void,
+  retype: () => Promise<void>,
 ): Promise<{ file: string; sessionId: string } | null> {
   const deadline = Date.now() + FIND_NEW_SESSION_TIMEOUT_MS;
   const normCwd = cwd.replace(/\\/g, '/').toLowerCase();
@@ -728,7 +802,7 @@ async function findNewSessionFile(
     await new Promise((r) => setTimeout(r, 500));
     if (Date.now() - lastRetypeAt > KICKOFF_RETRY_MS) {
       lastRetypeAt = Date.now();
-      retype();
+      await retype();
     }
     let entries: string[];
     try {

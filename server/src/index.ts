@@ -5,6 +5,7 @@ import { scanAll, PROJECTS_DIR } from './scan.js';
 import { parseTranscript } from './transcript.js';
 import { attachTerminal, detachTerminal, writeTermInput, resizeTerm, sendTerminalKey, spawnSession, startIdleEvictionSweep, shutdownAllSessions } from './sender.js';
 import { computeLimits, type Limits } from './usage.js';
+import { listDir } from './browse.js';
 import type { Snapshot } from './types.js';
 
 // This process serves every connected session, not just one — an uncaught
@@ -245,8 +246,13 @@ async function main() {
         });
       } else if (m.type === 'spawn' && typeof m.product === 'string') {
         // Any current session in that product names the repo root — a fresh
-        // session always lands there, never in a specific worktree.
-        const repoPath = current.agents.find((a) => a.product === m.product)?.repoPath;
+        // session always lands there, never in a specific worktree. A brand
+        // new product (no existing card to derive a repo root from) instead
+        // carries its own explicit `cwd`, chosen via the directory picker.
+        const repoPath =
+          typeof m.cwd === 'string' && m.cwd
+            ? m.cwd
+            : current.agents.find((a) => a.product === m.product)?.repoPath;
         if (!repoPath) {
           if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'spawn-error', product: m.product, error: 'unknown product' }));
           return;
@@ -275,6 +281,22 @@ async function main() {
             if (spawnedId) inFlight.delete(spawnedId);
           },
         );
+      } else if (m.type === 'listDir') {
+        const agentsForRoot = current.agents.map((a) => ({ repoPath: a.repoPath, lastActivity: a.lastActivity }));
+        void listDir(typeof m.path === 'string' ? m.path : undefined, agentsForRoot)
+          .then((listing) => {
+            if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'dirListing', ...listing }));
+          })
+          .catch((e) => {
+            if (ws.readyState === 1)
+              ws.send(
+                JSON.stringify({
+                  type: 'dirListing-error',
+                  path: typeof m.path === 'string' ? m.path : '',
+                  error: e instanceof Error ? e.message : String(e),
+                }),
+              );
+          });
       }
     });
   });
