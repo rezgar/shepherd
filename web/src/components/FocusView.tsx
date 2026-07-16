@@ -24,6 +24,7 @@ export function FocusView({
   onFontSize,
   onSend,
   sending,
+  sendingSince,
   onCancel,
   onHide,
   onSpawn,
@@ -54,6 +55,8 @@ export function FocusView({
   onFontSize: (delta: number) => void;
   onSend: (sessionId: string, cwd: string, text: string, images?: string[]) => void;
   sending: boolean;
+  /** Date.now() when the current in-flight send started — undefined if none. */
+  sendingSince: number | undefined;
   onCancel: (sessionId: string) => void;
   onHide: (sessionId: string) => void;
   onSpawn: (product: string) => void;
@@ -96,8 +99,36 @@ export function FocusView({
     };
     const root = focusRootRef.current;
     root?.addEventListener('mouseup', reclaim);
-    return () => root?.removeEventListener('mouseup', reclaim);
+    // DOM focus and OS window focus are independent — leaving the composer
+    // focused across an OS-level tab/window switch means keystrokes typed
+    // right after alt-tabbing back (meant for whatever the user THINKS is
+    // focused) land silently in this session's composer instead, and Enter
+    // sends them with zero confirmation (confirmed the hard way: a message
+    // never consciously composed landed in a live session this exact way).
+    // Blurring on window blur means a return trip always needs a real click
+    // first — the auto-focus convenience still holds for as long as you're
+    // actually in this tab, just not across a trip away from it.
+    const releaseOnBlur = () => {
+      if (document.activeElement === composerInputRef.current) composerInputRef.current?.blur();
+    };
+    window.addEventListener('blur', releaseOnBlur);
+    return () => {
+      root?.removeEventListener('mouseup', reclaim);
+      window.removeEventListener('blur', releaseOnBlur);
+    };
   }, [subagentModal]);
+
+  // A send that's been in flight a while with nothing else on screen reads as
+  // broken even when it's perfectly normal (a genuinely long turn) — there's
+  // no way to tell the two apart from here, so this doesn't claim failure,
+  // it just stops leaving you with literally nothing: elapsed time plus a
+  // safe way out (Stop preserves what you typed — see cancel() in api.ts).
+  // Dismissal is keyed to `sendingSince` itself so dismissing this one stall
+  // doesn't suppress the banner for a later, unrelated send.
+  const STALL_MS = 30_000;
+  const [dismissedStallFor, setDismissedStallFor] = useState<number | null>(null);
+  const stalledSinceMs = sending && sendingSince ? now - sendingSince : 0;
+  const stalled = stalledSinceMs >= STALL_MS && dismissedStallFor !== sendingSince;
 
   // Per-session composer drafts, kept across session switches (the Composer is
   // keyed by sessionId, so it remounts on switch and reads its session's draft).
@@ -248,6 +279,23 @@ export function FocusView({
           <button onClick={onDismissLiveElsewhereWarning} title="Dismiss">
             ×
           </button>
+        </div>
+      )}
+
+      {stalled && (
+        <div className="stall-warning">
+          <span>
+            ⏳ Still waiting on a response — {Math.round(stalledSinceMs / 1000)}s with no confirmation yet. The agent may
+            just be mid-task, or something could be stuck.
+          </span>
+          <span className="stall-warning__actions">
+            <button onClick={() => onCancel(focused.sessionId)} title="Interrupt it — what you typed is kept as a draft">
+              Stop &amp; keep as draft
+            </button>
+            <button onClick={() => setDismissedStallFor(sendingSince ?? null)} title="Dismiss">
+              Keep waiting
+            </button>
+          </span>
         </div>
       )}
 

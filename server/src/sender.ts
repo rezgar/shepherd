@@ -304,15 +304,32 @@ async function gracefulClose(p: IPty): Promise<void> {
  *  ambiguous between "still starting" and "silently died." Either way, the
  *  caller must not treat it like a normal finish — but with a persistent
  *  PTY, a timeout no longer means the session itself is lost, only that
- *  this particular confirmation attempt was inconclusive. */
+ *  this particular confirmation attempt was inconclusive.
+ *
+ *  `retype`, if given, is called once — halfway through the wait, and only
+ *  if `working` has never once been observed — to re-send the same
+ *  keystrokes. Confirmed the hard way this is needed even on a PTY that
+ *  already went quiet and looked ready: resuming a session runs its own
+ *  `SessionStart:resume` hook asynchronously, and output can go quiet while
+ *  that hook is still gating real input — the quiet-window "ready" signal
+ *  fires, Shepherd types into it, and the keystrokes land on a prompt that
+ *  isn't actually listening yet, silently swallowed with no error (the
+ *  session's own transcript showed a real turn starting seconds after a
+ *  first attempt like this went completely unacknowledged). Gated on
+ *  `!sawWorking` so it can only ever fire on a session with zero evidence
+ *  the first attempt was ever read — the same safety condition
+ *  `findNewSessionFile`'s retry already relies on. */
 async function waitForTurnToFinish(
   file: string,
   sessionId: string,
   isCancelled: () => boolean,
+  retype?: () => void,
 ): Promise<'done' | 'error' | 'cancelled' | 'timeout'> {
   const startDeadline = Date.now() + START_TIMEOUT_MS;
+  const retypeAt = Date.now() + START_TIMEOUT_MS / 2;
   let sawWorking = false;
   let notWorkingStreak = 0;
+  let retried = false;
   for (;;) {
     if (isCancelled()) return 'cancelled';
     await new Promise((r) => setTimeout(r, POLL_MS));
@@ -328,6 +345,11 @@ async function waitForTurnToFinish(
     if (sawWorking) {
       notWorkingStreak += 1;
       if (notWorkingStreak >= 2) return model.state === 'error' ? 'error' : 'done';
+      continue;
+    }
+    if (retype && !retried && now > retypeAt) {
+      retried = true;
+      retype();
       continue;
     }
     if (now > startDeadline) return 'timeout'; // never saw it start — don't hang forever
@@ -466,7 +488,18 @@ export function sendToSession(
       onError(e instanceof Error ? e.message : String(e));
       return;
     }
-    const outcome = await waitForTurnToFinish(file, sessionId, () => cancelled);
+    // Same clear-line-then-type sequence as the initial send, replayed once
+    // by waitForTurnToFinish if there's zero sign the first attempt was ever
+    // read — see its own comment for why a quiet PTY isn't always a ready one.
+    const retype = () => {
+      try {
+        entry.pty.write('\x01\x0b');
+        entry.pty.write(`${fullText}\r`);
+      } catch {
+        /* already dead — the outer timeout path reports this */
+      }
+    };
+    const outcome = await waitForTurnToFinish(file, sessionId, () => cancelled, retype);
     entry.lastActivity = Date.now();
     if (outcome === 'timeout') {
       // Unlike a disposable per-turn process, this PTY is the session's
@@ -625,7 +658,7 @@ export function spawnSession(
     });
     readyPtys.set(found.sessionId, { pty: p, pid: p.pid ?? -1, cwd, lastActivity: Date.now() });
 
-    const outcome = await waitForTurnToFinish(found.file, found.sessionId, () => cancelled);
+    const outcome = await waitForTurnToFinish(found.file, found.sessionId, () => cancelled, retype);
     if (outcome === 'timeout') {
       onError('session did not respond in time — it may be slow to start, or under heavy load');
       return;

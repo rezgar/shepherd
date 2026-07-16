@@ -206,7 +206,25 @@ async function main() {
         ws.focusSubagentId = undefined;
       } else if (m.type === 'send' && m.sessionId && m.cwd && typeof m.text === 'string' && m.text.trim()) {
         const targetFile = current.agents.find((a) => a.sessionId === m.sessionId)?.file;
-        if (!targetFile) return; // session not in the current snapshot — nothing to resume into
+        if (!targetFile) {
+          // The client already set its optimistic "sending…" state before this
+          // message was even parsed (see api.ts's send()) — silently returning
+          // here left it stuck that way forever with zero indication anything
+          // was wrong (confirmed the hard way: no error, no banner, nothing).
+          // `current` is only rebuilt on a debounced file-change or a 15s
+          // timer, so a session can legitimately be momentarily (or, if it's
+          // aged past the scan window, permanently) absent from it — either
+          // way the client must always get a response.
+          if (ws.readyState === 1)
+            ws.send(
+              JSON.stringify({
+                type: 'send-error',
+                sessionId: m.sessionId,
+                error: 'session not found in the current snapshot — try again in a moment',
+              }),
+            );
+          return;
+        }
         if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'send-ack', sessionId: m.sessionId }));
         const handle = sendToSession(
           m.sessionId,
