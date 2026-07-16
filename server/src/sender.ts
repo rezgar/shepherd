@@ -102,11 +102,85 @@ const FIND_NEW_SESSION_TIMEOUT_MS = 90_000;
 const IDLE_EVICT_MS = 30 * 60_000;
 const EVICT_SWEEP_MS = 5 * 60_000;
 
+/** Caps how much raw PTY output a session's ring buffer retains for replay
+ *  on attach/reconnect — big enough to redraw a full screen plus some
+ *  scrollback, small enough that many idle sessions don't add up. */
+const RING_BUFFER_CAP_BYTES = 256 * 1024;
+
+/** Bounded byte buffer of the most recent raw PTY output for one session —
+ *  what a client attaching (or reconnecting) replays before it starts
+ *  receiving live output, so the terminal redraws the current screen instead
+ *  of starting blank. Oldest bytes are dropped first once the cap is hit. */
+export class RingBuffer {
+  private chunks: Buffer[] = [];
+  private total = 0;
+
+  constructor(private readonly cap: number) {}
+
+  push(chunk: Buffer): void {
+    this.chunks.push(chunk);
+    this.total += chunk.length;
+    // Trim from the front until back under the cap — a chunk entirely
+    // outside the cap window is dropped whole; one straddling the boundary
+    // is sliced down to just its tail, not dropped wholesale (dropping it
+    // would lose bytes that are still within the cap).
+    while (this.total > this.cap) {
+      const first = this.chunks[0];
+      const excess = this.total - this.cap;
+      if (first.length <= excess) {
+        this.chunks.shift();
+        this.total -= first.length;
+      } else {
+        this.chunks[0] = first.subarray(excess);
+        this.total -= excess;
+      }
+    }
+  }
+
+  replay(): Buffer {
+    return Buffer.concat(this.chunks);
+  }
+}
+
+/** Serializes async work per key — the structural fix for the concurrent-
+ *  write corruption found in #13: two independent callers writing to the
+ *  same session's PTY at once (e.g. a WS reconnect racing an in-flight send)
+ *  would clear-and-retype over each other. A per-WS-handler check can be
+ *  bypassed by a future code path that forgets it; a lock owned by the PTY
+ *  entry itself cannot be — every write, from wherever it originates, queues
+ *  on the same promise chain and runs strictly one at a time. */
+export class AsyncLock {
+  private tail: Promise<void> = Promise.resolve();
+
+  run<T>(fn: () => Promise<T>): Promise<T> {
+    const result = this.tail.then(fn, fn);
+    this.tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+}
+
+/** The minimal shape sender.ts needs from a WS connection — avoids importing
+ *  the `ws` package's own WebSocket type here just for a `send`/`readyState`
+ *  call; index.ts's FocusWs already satisfies this structurally. */
+interface FocusWsLike {
+  readyState: number;
+  send(data: string): void;
+}
+
 interface PersistentPty {
   pty: IPty;
   pid: number;
   cwd: string;
   lastActivity: number;
+  /** Recent raw output, replayed to a client that attaches or reconnects. */
+  buffer: RingBuffer;
+  /** Structural single-writer guarantee — see AsyncLock. */
+  writeLock: AsyncLock;
+  /** WS connections currently attached to this session's live output. */
+  subscribers: Set<FocusWsLike>;
 }
 
 /** Must drain the pty's output — ConPTY's buffer fills fast against a TUI's
@@ -154,7 +228,15 @@ async function spawnPersistent(sessionId: string, cwd: string): Promise<Persiste
     cwd,
     env: cleanEnv(),
   });
+  const buffer = new RingBuffer(RING_BUFFER_CAP_BYTES);
+  const subscribers = new Set<FocusWsLike>();
   const idleFor = drainAndTrack(p);
+  p.onData((chunk: string) => {
+    buffer.push(Buffer.from(chunk, 'utf8'));
+    for (const sub of subscribers) {
+      if (sub.readyState === 1) sub.send(JSON.stringify({ type: 'termOutput', sessionId, chunk }));
+    }
+  });
   p.onExit(() => {
     // Only remove if this exit is for the entry we think is current — a
     // stale onExit firing after eviction-and-respawn must not delete the
@@ -162,7 +244,7 @@ async function spawnPersistent(sessionId: string, cwd: string): Promise<Persiste
     if (readyPtys.get(sessionId)?.pid === p.pid) readyPtys.delete(sessionId);
   });
   await waitForPtyQuiet(idleFor);
-  return { pty: p, pid: p.pid ?? -1, cwd, lastActivity: Date.now() };
+  return { pty: p, pid: p.pid ?? -1, cwd, lastActivity: Date.now(), buffer, writeLock: new AsyncLock(), subscribers };
 }
 
 /** Reuse this session's live PTY if it has one; otherwise spawn and wait out
@@ -186,6 +268,65 @@ async function getOrSpawnPty(sessionId: string, cwd: string): Promise<Persistent
   } finally {
     spawning.delete(sessionId);
   }
+}
+
+/** Attach a WS connection to a session's live terminal output — ensures the
+ *  PTY is live (spawning if needed), replays its ring buffer to `ws`
+ *  immediately, then subscribes `ws` to future output. Returns 'error' with
+ *  a message if the PTY couldn't be reached at all. */
+export async function attachTerminal(
+  sessionId: string,
+  cwd: string,
+  ws: FocusWsLike,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  let entry: PersistentPty;
+  try {
+    entry = await getOrSpawnPty(sessionId, cwd);
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+  entry.subscribers.add(ws);
+  entry.lastActivity = Date.now();
+  const replay = entry.buffer.replay();
+  if (replay.length && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'termOutput', sessionId, chunk: replay.toString('utf8') }));
+  }
+  return { ok: true };
+}
+
+/** Stop streaming this session's output to `ws` — the PTY itself is
+ *  untouched, exactly like closing one terminal window onto a tmux session
+ *  that keeps running. */
+export function detachTerminal(sessionId: string, ws: FocusWsLike): void {
+  readyPtys.get(sessionId)?.subscribers.delete(ws);
+}
+
+/** Write text (plus any pasted images, saved to temp files and noted the
+ *  same way today's send path already does) to a session's PTY, serialized
+ *  through its write lock so a second concurrent call can never interleave
+ *  with this one. Defensively clears whatever's on the input line first —
+ *  see the matching comment history on this exact sequence for why it isn't
+ *  always empty (the CLI restores Escape-interrupted text into the input
+ *  line for editing). */
+export async function writeTermInput(
+  sessionId: string,
+  cwd: string,
+  text: string,
+  images: string[] | undefined,
+): Promise<void> {
+  const entry = await getOrSpawnPty(sessionId, cwd);
+  entry.lastActivity = Date.now();
+  const fullText = withImageNotes(text, sessionId, images);
+  await entry.writeLock.run(async () => {
+    entry.pty.write('\x01\x0b');
+    entry.pty.write(`${fullText}\r`);
+  });
+}
+
+/** Resize a session's PTY to match its terminal panel's actual size. */
+export function resizeTerm(sessionId: string, cols: number, rows: number): void {
+  const entry = readyPtys.get(sessionId);
+  entry?.pty.resize(cols, rows);
 }
 
 interface LiveAgentEntry {
@@ -297,6 +438,12 @@ async function gracefulClose(p: IPty): Promise<void> {
  *  Ground truth lives in the transcript either way; this just reads it
  *  instead of re-deriving it.
  *
+ *  Only `spawnSession`'s new-session kickoff still uses this — the reply
+ *  path (`writeTermInput`) no longer needs to confirm completion at all,
+ *  since the caller is watching the live terminal stream directly. A brand
+ *  new session has no live stream to watch until its session id is known,
+ *  so this is still how the kickoff's own success gets confirmed.
+ *
  *  Returns `'timeout'` — distinct from `'done'` — if it never once saw the
  *  turn start: under enough concurrent load a `--resume` can take well over
  *  a minute just to reach its input prompt (confirmed the hard way — 65s+
@@ -313,9 +460,7 @@ async function gracefulClose(p: IPty): Promise<void> {
  *  `SessionStart:resume` hook asynchronously, and output can go quiet while
  *  that hook is still gating real input — the quiet-window "ready" signal
  *  fires, Shepherd types into it, and the keystrokes land on a prompt that
- *  isn't actually listening yet, silently swallowed with no error (the
- *  session's own transcript showed a real turn starting seconds after a
- *  first attempt like this went completely unacknowledged). Gated on
+ *  isn't actually listening yet, silently swallowed with no error. Gated on
  *  `!sawWorking` so it can only ever fire on a session with zero evidence
  *  the first attempt was ever read — the same safety condition
  *  `findNewSessionFile`'s retry already relies on. */
@@ -354,185 +499,6 @@ async function waitForTurnToFinish(
     }
     if (now > startDeadline) return 'timeout'; // never saw it start — don't hang forever
   }
-}
-
-/** Total non-empty line count — a before/after anchor for `didMessageLand`,
- *  which does the `type: 'user'` filtering once it has the new-lines slice. */
-export async function countLines(file: string): Promise<number> {
-  try {
-    const raw = await readFileAsync(file, 'utf8');
-    return raw.split('\n').filter((l) => l.trim()).length;
-  } catch {
-    return 0;
-  }
-}
-
-/** After a send appears to "finish" per aggregate transcript state, confirm
- *  OUR specific message actually became a real turn — not just that the
- *  session cycled working→idle, which a session with another live writer
- *  can satisfy via its OWN unrelated activity while our `--resume` silently
- *  never got read at all (confirmed possible: two `--resume` processes on
- *  one session don't reliably both get to submit input; the other one's
- *  ordinary work still trips the same "it finished" heuristic, producing a
- *  false success — Shepherd says sent, nothing was ever actually
- *  processed). Scoped to only lines written after `linesBefore` so a match
- *  can't come from something the OTHER process said earlier or later. */
-export async function didMessageLand(file: string, sentText: string, linesBefore: number): Promise<boolean> {
-  const needle = sentText.trim().slice(0, 80);
-  if (!needle) return true; // nothing text-based to confirm (shouldn't happen — callers always send some text)
-  let raw: string;
-  try {
-    raw = await readFileAsync(file, 'utf8');
-  } catch {
-    return false;
-  }
-  const lines = raw.split('\n').filter((l) => l.trim());
-  for (const line of lines.slice(linesBefore)) {
-    let o: any;
-    try {
-      o = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (o.type !== 'user') continue;
-    const content = o.message?.content;
-    const text =
-      typeof content === 'string'
-        ? content
-        : Array.isArray(content)
-          ? content.map((c: any) => (typeof c?.text === 'string' ? c.text : '')).join(' ')
-          : '';
-    if (text.includes(needle)) return true;
-  }
-  return false;
-}
-
-/**
- * Reply into an existing session by typing into its live PTY — spawning one
- * first (and waiting out its startup) only if it doesn't already have one.
- * `file` is that session's transcript path (the caller already has it from
- * the snapshot), used only to poll for completion; nothing about how it's
- * read changes.
- */
-export function sendToSession(
-  sessionId: string,
-  cwd: string,
-  file: string,
-  text: string,
-  images: string[] | undefined,
-  /** `wasLiveElsewhere` is true when another interactive process already had
-   *  this session open at send time — the send still went out, but its
-   *  output may be interleaved with that other process's. */
-  onDone: (wasLiveElsewhere: boolean) => void,
-  onError: (msg: string) => void,
-  onCancelled: () => void,
-): SendHandle {
-  const fullText = withImageNotes(text, sessionId, images);
-  let cancelled = false;
-  let ptyRef: IPty | null = null;
-  const handle: SendHandle = {
-    cancel: () => {
-      cancelled = true;
-      try {
-        ptyRef?.write('\x1b');
-      } catch {
-        /* not spawned yet, or already dead — nothing to interrupt either way */
-      }
-    },
-  };
-
-  void (async () => {
-    // Ground-truth pre-flight: informational only. A second, genuinely
-    // OTHER `--resume` into a session already attached elsewhere WILL
-    // collide with it (confirmed the hard way — both just run, interleaving
-    // into the same transcript with no way to tell which turn is whose) —
-    // but that's the caller's call to make, not this daemon's to silently
-    // block.
-    const wasLiveElsewhere = await isSessionLiveElsewhere(sessionId);
-    if (cancelled) {
-      onCancelled();
-      return;
-    }
-
-    let entry: PersistentPty;
-    try {
-      entry = await getOrSpawnPty(sessionId, cwd);
-    } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
-      return;
-    }
-    ptyRef = entry.pty;
-    // Cancelled while we were (possibly first-time, slow) spawning/warming
-    // up — the PTY itself stays in the pool for next time, just don't type
-    // into it for a request that's no longer wanted.
-    if (cancelled) {
-      onCancelled();
-      return;
-    }
-
-    const linesBefore = await countLines(file);
-    try {
-      // Clear whatever might already be sitting on the input line before
-      // typing — confirmed the hard way that it isn't always empty: the CLI
-      // restores an interrupted (Escape'd) message back into the input box
-      // for editing, exactly as it would for a human at the keyboard. A
-      // human seeing that would clear it before typing the next thing;
-      // Shepherd writes blindly and has no such feedback loop, so a message
-      // sent right after a cancelled one landed concatenated with it
-      // ("...number.\rReply with exactly: ..." as ONE literal turn). Ctrl-A
-      // (start of line) + Ctrl-K (kill to end) clears it regardless of where
-      // the cursor happens to sit; a no-op if the line was already empty.
-      entry.pty.write('\x01\x0b');
-      entry.pty.write(`${fullText}\r`);
-    } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
-      return;
-    }
-    // Same clear-line-then-type sequence as the initial send, replayed once
-    // by waitForTurnToFinish if there's zero sign the first attempt was ever
-    // read — see its own comment for why a quiet PTY isn't always a ready one.
-    const retype = () => {
-      try {
-        entry.pty.write('\x01\x0b');
-        entry.pty.write(`${fullText}\r`);
-      } catch {
-        /* already dead — the outer timeout path reports this */
-      }
-    };
-    const outcome = await waitForTurnToFinish(file, sessionId, () => cancelled, retype);
-    entry.lastActivity = Date.now();
-    if (outcome === 'timeout') {
-      // Unlike a disposable per-turn process, this PTY is the session's
-      // long-lived one — a mere confirmation timeout doesn't warrant
-      // killing it (it may just be a slow-running turn). Leave it up;
-      // report the uncertainty so the caller can retry or wait and recheck.
-      onError('could not confirm the message was processed in time — it may still be running; check back or retry');
-      return;
-    }
-    if (outcome === 'cancelled') {
-      onCancelled();
-      return;
-    }
-    if (outcome === 'error') {
-      onError('session reported an error');
-      return;
-    }
-    // "done" per aggregate transcript state alone is NOT proof our specific
-    // message actually landed — a live-elsewhere session cycling through its
-    // OWN unrelated working→idle transition satisfies that same heuristic,
-    // producing a false "sent" while our input never actually got read at
-    // all (confirmed the exact failure mode this guards against: Shepherd
-    // reported success, the agent never reacted, because two `--resume`
-    // processes on one session don't reliably both get to submit input).
-    const landed = await didMessageLand(file, fullText, linesBefore);
-    if (!landed) {
-      onError('message may not have been processed — this session appears to be in active use elsewhere');
-      return;
-    }
-    onDone(wasLiveElsewhere);
-  })();
-
-  return handle;
 }
 
 /**
@@ -653,10 +619,26 @@ export function spawnSession(
     // From here on, this IS the session's live PTY — register it so every
     // future send reuses this same process instead of spawning a fresh one,
     // exactly like staying in the terminal window you just opened.
+    const buffer = new RingBuffer(RING_BUFFER_CAP_BYTES);
+    const subscribers = new Set<FocusWsLike>();
+    p.onData((chunk: string) => {
+      buffer.push(Buffer.from(chunk, 'utf8'));
+      for (const sub of subscribers) {
+        if (sub.readyState === 1) sub.send(JSON.stringify({ type: 'termOutput', sessionId: found.sessionId, chunk }));
+      }
+    });
     p.onExit(() => {
       if (readyPtys.get(found.sessionId)?.pid === p.pid) readyPtys.delete(found.sessionId);
     });
-    readyPtys.set(found.sessionId, { pty: p, pid: p.pid ?? -1, cwd, lastActivity: Date.now() });
+    readyPtys.set(found.sessionId, {
+      pty: p,
+      pid: p.pid ?? -1,
+      cwd,
+      lastActivity: Date.now(),
+      buffer,
+      writeLock: new AsyncLock(),
+      subscribers,
+    });
 
     const outcome = await waitForTurnToFinish(found.file, found.sessionId, () => cancelled, retype);
     if (outcome === 'timeout') {

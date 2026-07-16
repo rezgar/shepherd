@@ -3,7 +3,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import chokidar from 'chokidar';
 import { scanAll, PROJECTS_DIR } from './scan.js';
 import { parseTranscript } from './transcript.js';
-import { sendToSession, spawnSession, startIdleEvictionSweep, shutdownAllSessions } from './sender.js';
+import { attachTerminal, detachTerminal, writeTermInput, resizeTerm, spawnSession, startIdleEvictionSweep, shutdownAllSessions } from './sender.js';
 import { computeLimits, type Limits } from './usage.js';
 import type { Snapshot } from './types.js';
 
@@ -33,6 +33,8 @@ interface FocusWs extends WebSocket {
   focusSession?: string;
   focusSubagentFile?: string;
   focusSubagentId?: string;
+  /** The session this connection is currently streaming live terminal output for. */
+  termSession?: string;
 }
 
 /** A subagent's own transcript lives at <projectDir>/<sessionId>/subagents/agent-<agentId>.jsonl. */
@@ -179,6 +181,9 @@ async function main() {
   };
 
   wss.on('connection', (ws: FocusWs) => {
+    ws.on('close', () => {
+      if (ws.termSession) detachTerminal(ws.termSession, ws);
+    });
     ws.send(JSON.stringify(current));
     if (currentLimits) ws.send(JSON.stringify({ type: 'limits', ...currentLimits }));
     ws.on('message', (buf) => {
@@ -204,77 +209,29 @@ async function main() {
       } else if (m.type === 'unfocusSubagent') {
         ws.focusSubagentFile = undefined;
         ws.focusSubagentId = undefined;
-      } else if (m.type === 'send' && m.sessionId && m.cwd && typeof m.text === 'string' && m.text.trim()) {
-        if (inFlight.has(m.sessionId)) {
-          // A second concurrent send for a session that already has one in
-          // flight must never reach sendToSession — both would write to the
-          // SAME persistent PTY with no coordination between them, clearing
-          // and retyping over each other mid-write. Confirmed the hard way:
-          // this produced one turn with several messages' text and stray \r
-          // bytes all jammed together, none of them ever cleanly submitted.
-          // The client is supposed to queue instead of sending while a send
-          // is already in flight, but that guard lives entirely client-side
-          // (`sending` state) — a WS reconnect (this daemon restarting, a
-          // dropped connection) clears it locally while the ORIGINAL
-          // sendToSession call keeps running server-side unaffected, so a
-          // retry after reconnecting collides with it. This is the
-          // server-side backstop for that gap.
+      } else if (m.type === 'attachTerm' && m.sessionId && m.cwd) {
+        ws.termSession = m.sessionId;
+        void attachTerminal(m.sessionId, m.cwd, ws).then((result) => {
+          if (!result.ok && ws.readyState === 1) {
+            ws.send(JSON.stringify({ type: 'termError', sessionId: m.sessionId, error: result.error }));
+          }
+        });
+      } else if (m.type === 'detachTerm' && m.sessionId) {
+        detachTerminal(m.sessionId, ws);
+        if (ws.termSession === m.sessionId) ws.termSession = undefined;
+      } else if (m.type === 'termInput' && m.sessionId && m.cwd && typeof m.text === 'string') {
+        void writeTermInput(m.sessionId, m.cwd, m.text, Array.isArray(m.images) ? m.images : undefined).catch((e) => {
           if (ws.readyState === 1)
             ws.send(
               JSON.stringify({
-                type: 'send-error',
+                type: 'termError',
                 sessionId: m.sessionId,
-                error: 'a send is already in flight for this session — wait for it to finish, then retry',
+                error: e instanceof Error ? e.message : String(e),
               }),
             );
-          return;
-        }
-        const targetFile = current.agents.find((a) => a.sessionId === m.sessionId)?.file;
-        if (!targetFile) {
-          // The client already set its optimistic "sending…" state before this
-          // message was even parsed (see api.ts's send()) — silently returning
-          // here left it stuck that way forever with zero indication anything
-          // was wrong (confirmed the hard way: no error, no banner, nothing).
-          // `current` is only rebuilt on a debounced file-change or a 15s
-          // timer, so a session can legitimately be momentarily (or, if it's
-          // aged past the scan window, permanently) absent from it — either
-          // way the client must always get a response.
-          if (ws.readyState === 1)
-            ws.send(
-              JSON.stringify({
-                type: 'send-error',
-                sessionId: m.sessionId,
-                error: 'session not found in the current snapshot — try again in a moment',
-              }),
-            );
-          return;
-        }
-        if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'send-ack', sessionId: m.sessionId }));
-        const handle = sendToSession(
-          m.sessionId,
-          m.cwd,
-          targetFile,
-          m.text,
-          Array.isArray(m.images) ? m.images : undefined,
-          (wasLiveElsewhere) => {
-            inFlight.delete(m.sessionId);
-            if (ws.readyState === 1)
-              ws.send(JSON.stringify({ type: 'send-done', sessionId: m.sessionId, wasLiveElsewhere }));
-            void sendWindow(ws); // nudge a transcript refresh in case the file-watch is slow
-          },
-          (error) => {
-            inFlight.delete(m.sessionId);
-            if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'send-error', sessionId: m.sessionId, error }));
-          },
-          () => {
-            inFlight.delete(m.sessionId);
-            if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'send-cancelled', sessionId: m.sessionId }));
-            void sendWindow(ws);
-          },
-        );
-        inFlight.set(m.sessionId, handle);
-      } else if (m.type === 'cancel' && m.sessionId) {
-        inFlight.get(m.sessionId)?.cancel();
+        });
+      } else if (m.type === 'termResize' && m.sessionId && typeof m.cols === 'number' && typeof m.rows === 'number') {
+        resizeTerm(m.sessionId, m.cols, m.rows);
       } else if (m.type === 'spawn' && typeof m.product === 'string') {
         // Any current session in that product names the repo root — a fresh
         // session always lands there, never in a specific worktree.

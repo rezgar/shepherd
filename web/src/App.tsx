@@ -26,27 +26,21 @@ export function App() {
     limits,
     connected,
     focusedId,
-    messages,
-    hasMore,
     focus,
     unfocus,
-    loadMore,
-    send,
-    cancel,
-    sendingIds,
-    sendingSince,
-    queueSend,
-    dequeueSend,
-    queuedMsgs,
-    forceSendQueued,
+    termResetKey,
+    termError,
+    attachTerminal,
+    detachTerminal,
+    subscribeTerminal,
+    sendTermInput,
+    resizeTerm,
     spawn,
     spawningProducts,
     activeSubagents,
     openSubagent,
     closeSubagent,
     subagentModal,
-    liveElsewhereWarnings,
-    dismissLiveElsewhereWarning,
   } = useShepherd();
   const now = useTick(1000);
   // Never resets once true — distinguishes "still starting up" (fine, just
@@ -176,9 +170,6 @@ export function App() {
         <FocusView
           agents={shownVisible}
           focused={focused}
-          messages={messages}
-          hasMore={hasMore}
-          onLoadMore={loadMore}
           now={now}
           colorOf={colorOf}
           nameOf={nameOf}
@@ -187,23 +178,20 @@ export function App() {
           onRename={rename}
           fontSize={fontSize}
           onFontSize={changeFont}
-          onSend={send}
-          sending={sendingIds.has(focused.sessionId)}
-          sendingSince={sendingSince[focused.sessionId]}
-          onCancel={cancel}
           onHide={hide}
           onSpawn={spawn}
           spawningProducts={spawningProducts}
-          queued={queuedMsgs[focused.sessionId] ?? []}
-          onQueueSend={queueSend}
-          onDequeueSend={dequeueSend}
-          onForceSendQueued={forceSendQueued}
           activeSubagents={activeSubagents}
           onSelectSubagent={(s) => openSubagent(focused.file, focused.sessionId, s.agentId, s.description)}
           onCloseSubagent={closeSubagent}
           subagentModal={subagentModal}
-          liveElsewhereWarning={liveElsewhereWarnings.has(focused.sessionId)}
-          onDismissLiveElsewhereWarning={() => dismissLiveElsewhereWarning(focused.sessionId)}
+          subscribeTerminal={subscribeTerminal}
+          termResetKey={termResetKey}
+          termError={termError}
+          onAttachTerminal={attachTerminal}
+          onDetachTerminal={detachTerminal}
+          onSendTermInput={sendTermInput}
+          onResizeTerm={resizeTerm}
         />
       </div>
     );
