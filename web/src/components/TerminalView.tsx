@@ -39,18 +39,26 @@ import '@xterm/xterm/css/xterm.css';
  *  parent render, and listing it would force the terminal to tear down and
  *  rebuild on every render instead of only on a genuine session switch.
  *
- *  Never lets itself hold keyboard focus. xterm.js creates a hidden
- *  `<textarea>` to capture every keystroke (real terminals need to intercept
- *  things like Ctrl+C rather than let the browser handle them), and once
- *  that textarea has focus it swallows key events before app-level shortcuts
- *  (Alt+N session switching, etc.) ever see them — confirmed the hard way:
- *  clicking into the terminal silently broke every keyboard shortcut until
- *  you clicked back into the composer. There's no reason for it to ever hold
- *  focus here — the terminal is output-only, `TermComposer` is the only
- *  place typed input goes — so `tabIndex=-1` keeps Tab from landing on it,
- *  and a `focusin` listener blurs it immediately if it grabs focus anyway
- *  (e.g. via a raw mouse click). Mouse-drag text selection for copy doesn't
- *  depend on the textarea holding focus, so this doesn't cost you that. */
+ *  Only holds keyboard focus while there's an active text selection —
+ *  never otherwise. xterm.js creates a hidden `<textarea>` to capture every
+ *  keystroke, and once that textarea has focus it swallows key events
+ *  before app-level shortcuts (Alt+N session switching, etc.) ever see
+ *  them — confirmed the hard way: clicking into the terminal silently
+ *  broke every keyboard shortcut until you clicked back into the composer.
+ *  `tabIndex=-1` keeps Tab from landing on it; a `mouseup` listener blurs
+ *  it back to nothing UNLESS `term.hasSelection()` is true, releasing focus
+ *  after a plain click but keeping it through a text-selection drag.
+ *
+ *  That selection check has to go through xterm's OWN `hasSelection()` /
+ *  `getSelection()` API, not `window.getSelection()` — xterm manages
+ *  selection as its own internal model, not real native DOM text
+ *  selection, so the browser's selection API never sees it at all.
+ *  Confirmed the hard way this mattered: an earlier version blurred on
+ *  every `focusin` instead of `mouseup`, which fires at mousedown — before
+ *  a drag can even start — and silently broke copy entirely, since
+ *  yanking focus away mid-gesture stops xterm's own mousemove-driven
+ *  selection tracking from ever registering a selection in the first
+ *  place, not just from surviving until Ctrl+C. */
 export function TerminalView({
   resetKey,
   subscribeTerminal,
@@ -94,12 +102,30 @@ export function TerminalView({
     termRef.current = term;
     fitRef.current = fit;
 
+    // xterm.js does NOT copy on Ctrl+C by default — a real terminal needs
+    // Ctrl+C to send SIGINT, so its own internal keydown handling always
+    // preventDefaults it, which blocks the browser's native
+    // copy-the-selection behavior too, selection or not. Returning `false`
+    // here tells xterm to skip its own handling for exactly this one case
+    // (Ctrl/Cmd+C with an active selection) instead of preventing the
+    // default — letting the browser's native copy shortcut run normally.
+    // Confirmed the hard way this was the actual blocker: even after
+    // fixing the focus-yanking bug that stopped selections from forming at
+    // all, Ctrl+C with a real selection still copied nothing without this.
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && term.hasSelection()) {
+        return false;
+      }
+      return true;
+    });
+
     const helperTextarea = container.querySelector<HTMLTextAreaElement>('.xterm-helper-textarea');
     if (helperTextarea) helperTextarea.tabIndex = -1;
-    const blurOnFocus = (e: FocusEvent) => {
-      (e.target as HTMLElement | null)?.blur?.();
+    const releaseFocusIfNoSelection = () => {
+      if (term.hasSelection()) return;
+      helperTextarea?.blur();
     };
-    container.addEventListener('focusin', blurOnFocus);
+    container.addEventListener('mouseup', releaseFocusIfNoSelection);
 
     const unsubscribe = subscribeRef.current((chunk) => term.write(chunk));
 
@@ -110,7 +136,7 @@ export function TerminalView({
     ro.observe(container);
 
     return () => {
-      container.removeEventListener('focusin', blurOnFocus);
+      container.removeEventListener('mouseup', releaseFocusIfNoSelection);
       unsubscribe();
       ro.disconnect();
       term.dispose();
