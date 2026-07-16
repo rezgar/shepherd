@@ -37,7 +37,20 @@ import '@xterm/xterm/css/xterm.css';
  *  `onResize` is captured in a ref (kept fresh every render) rather than
  *  listed as an effect dependency — it's a fresh function identity on every
  *  parent render, and listing it would force the terminal to tear down and
- *  rebuild on every render instead of only on a genuine session switch. */
+ *  rebuild on every render instead of only on a genuine session switch.
+ *
+ *  Never lets itself hold keyboard focus. xterm.js creates a hidden
+ *  `<textarea>` to capture every keystroke (real terminals need to intercept
+ *  things like Ctrl+C rather than let the browser handle them), and once
+ *  that textarea has focus it swallows key events before app-level shortcuts
+ *  (Alt+N session switching, etc.) ever see them — confirmed the hard way:
+ *  clicking into the terminal silently broke every keyboard shortcut until
+ *  you clicked back into the composer. There's no reason for it to ever hold
+ *  focus here — the terminal is output-only, `TermComposer` is the only
+ *  place typed input goes — so `tabIndex=-1` keeps Tab from landing on it,
+ *  and a `focusin` listener blurs it immediately if it grabs focus anyway
+ *  (e.g. via a raw mouse click). Mouse-drag text selection for copy doesn't
+ *  depend on the textarea holding focus, so this doesn't cost you that. */
 export function TerminalView({
   resetKey,
   subscribeTerminal,
@@ -81,6 +94,13 @@ export function TerminalView({
     termRef.current = term;
     fitRef.current = fit;
 
+    const helperTextarea = container.querySelector<HTMLTextAreaElement>('.xterm-helper-textarea');
+    if (helperTextarea) helperTextarea.tabIndex = -1;
+    const blurOnFocus = (e: FocusEvent) => {
+      (e.target as HTMLElement | null)?.blur?.();
+    };
+    container.addEventListener('focusin', blurOnFocus);
+
     const unsubscribe = subscribeRef.current((chunk) => term.write(chunk));
 
     const ro = new ResizeObserver(() => {
@@ -90,6 +110,7 @@ export function TerminalView({
     ro.observe(container);
 
     return () => {
+      container.removeEventListener('focusin', blurOnFocus);
       unsubscribe();
       ro.disconnect();
       term.dispose();
