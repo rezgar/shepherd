@@ -35,6 +35,7 @@ export function App() {
     subscribeTerminal,
     sendTermInput,
     resizeTerm,
+    sendTerminalKey,
     spawn,
     spawningProducts,
     activeSubagents,
@@ -192,6 +193,7 @@ export function App() {
           onDetachTerminal={detachTerminal}
           onSendTermInput={sendTermInput}
           onResizeTerm={resizeTerm}
+          onSendTerminalKey={sendTerminalKey}
         />
       </div>
     );

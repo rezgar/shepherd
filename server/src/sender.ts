@@ -329,6 +329,25 @@ export function resizeTerm(sessionId: string, cols: number, rows: number): void 
   entry?.pty.resize(cols, rows);
 }
 
+/** Write a raw control sequence (e.g. Escape to interrupt generation, same
+ *  as a person pressing it at a real keyboard) straight to a session's PTY —
+ *  no line-clear, no trailing `\r`, none of writeTermInput's "compose a new
+ *  line" behavior, since this is meant to act on whatever the CLI is doing
+ *  RIGHT NOW rather than submit new text. Still serialized through the same
+ *  write lock so it can never interleave with a concurrent writeTermInput
+ *  call. Removing the old send/cancel machinery (see #13's design spec)
+ *  dropped Escape-to-interrupt entirely along with it — the terminal view
+ *  never wires xterm's own keyboard capture (it's output-only, TermComposer
+ *  is the only place typed input goes), so without a dedicated path like
+ *  this, Escape had nowhere left to go at all. */
+export async function sendTerminalKey(sessionId: string, cwd: string, key: string): Promise<void> {
+  const entry = await getOrSpawnPty(sessionId, cwd);
+  entry.lastActivity = Date.now();
+  await entry.writeLock.run(async () => {
+    entry.pty.write(key);
+  });
+}
+
 interface LiveAgentEntry {
   pid?: number;
   sessionId?: string;

@@ -29,6 +29,7 @@ export function FocusView({
   onDetachTerminal,
   onSendTermInput,
   onResizeTerm,
+  onSendTerminalKey,
   subscribeTerminal,
 }: {
   agents: AgentModel[];
@@ -54,12 +55,14 @@ export function FocusView({
   onDetachTerminal: (sessionId: string) => void;
   onSendTermInput: (sessionId: string, cwd: string, text: string, images?: string[]) => void;
   onResizeTerm: (sessionId: string, cols: number, rows: number) => void;
+  onSendTerminalKey: (sessionId: string, cwd: string, key: string) => void;
   subscribeTerminal: (onChunk: (chunk: string) => void) => () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const name = nameOf(focused);
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const focusRootRef = useRef<HTMLDivElement>(null);
 
   // Attach on mount / whenever the focused session changes; detach on
   // unmount / session switch. The PTY itself keeps running either way (see
@@ -74,29 +77,54 @@ export function FocusView({
     return () => attachRef.current.onDetachTerminal(focused.sessionId);
   }, [focused.sessionId, focused.cwd]);
 
-  // Same "stay focused unless you're doing something else" behavior as
-  // before, minus the mouseup-reclaim edge cases that no longer apply
-  // (there's no chat transcript text to select here) — but still release on
-  // window blur so keystrokes after an OS-level tab switch don't land here
-  // unintentionally (see FocusView history / design spec for why).
+  // The composer should hold focus by default — you can always just start
+  // typing — except while you're genuinely doing something else with the
+  // mouse: selecting text to copy (including from the terminal output, which
+  // is real selectable text), or typing into another real text field (the
+  // rename box). A click that lands on neither reclaims focus right after,
+  // e.g. clicking the font-size controls — this is the same behavior the
+  // chat-based UI had; it quietly dropped out when this component was
+  // rewritten for the terminal view and nothing else ever restored it.
   useEffect(() => {
     if (subagentModal) return;
+    const isTextEntry = (el: Element | null) =>
+      !!el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || (el as HTMLElement).isContentEditable);
+    const reclaim = () => {
+      if (isTextEntry(document.activeElement)) return;
+      if ((window.getSelection()?.toString().length ?? 0) > 0) return;
+      composerInputRef.current?.focus();
+    };
+    const root = focusRootRef.current;
+    root?.addEventListener('mouseup', reclaim);
+    // Also release focus on window blur so keystrokes after an OS-level tab
+    // switch don't land in an already-focused composer unintentionally
+    // (confirmed the hard way earlier: alt-tabbing back and typing sent an
+    // unintended message because DOM focus survives an OS-level switch).
     const releaseOnBlur = () => {
       if (document.activeElement === composerInputRef.current) composerInputRef.current?.blur();
     };
     window.addEventListener('blur', releaseOnBlur);
-    return () => window.removeEventListener('blur', releaseOnBlur);
+    return () => {
+      root?.removeEventListener('mouseup', reclaim);
+      window.removeEventListener('blur', releaseOnBlur);
+    };
   }, [subagentModal]);
 
+  // Esc closes the subagent modal if one's open; otherwise it interrupts
+  // whatever the session is doing, exactly like pressing it in a real
+  // terminal — this has nowhere else to go now that the terminal view is
+  // output-only (it never wires xterm's own keyboard capture, see
+  // TerminalView), so without this Escape had no path to the pty at all.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape' || editing || !subagentModal) return;
+      if (e.key !== 'Escape' || editing) return;
       e.preventDefault();
-      onCloseSubagent();
+      if (subagentModal) onCloseSubagent();
+      else onSendTerminalKey(focused.sessionId, focused.cwd, '\x1b');
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [editing, subagentModal, onCloseSubagent]);
+  }, [editing, subagentModal, onCloseSubagent, onSendTerminalKey, focused.sessionId, focused.cwd]);
 
   const startEdit = () => {
     setDraft(name);
@@ -108,7 +136,7 @@ export function FocusView({
   };
 
   return (
-    <div className="focus">
+    <div className="focus" ref={focusRootRef}>
       <CardStrip
         agents={agents}
         focusedId={focused.sessionId}
