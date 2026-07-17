@@ -39,6 +39,11 @@ export interface AgentModel {
   stage: Stage;
   /** High-level card status while working — the current task, one altitude below `stage`. */
   status: string;
+  /** Conceptual, plain-language line of what the agent is doing and how it's
+   *  going, produced by a fast model over the recent transcript (see
+   *  summarize.ts). Set only for working / just-finished sessions; null
+   *  otherwise, so the card falls back to `status`. */
+  summary?: string | null;
   /** Granular "doing this instant" detail — shown in the focus-view ✽ indicator. */
   activity: string;
   /** If needs-you, what kind of action. */

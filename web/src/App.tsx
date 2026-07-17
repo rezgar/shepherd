@@ -41,6 +41,8 @@ export function App() {
     spawn,
     spawningProducts,
     spawnErrors,
+    justSpawned,
+    consumeSpawned,
     dirListing,
     dirListingError,
     listDir,
@@ -163,6 +165,17 @@ export function App() {
     });
     if (sessionId === focusedId) unfocus();
   };
+
+  // A session created from a "+" card auto-opens the instant its transcript
+  // shows up: it goes into the explicitly-opened set (so it appears in the
+  // focus strip immediately) and becomes the focused session, so you land in
+  // it instead of hunting for it on the canvas. See detectNewlySpawned in
+  // api.ts. openSession is a no-op for openedAt if you'd already opened it.
+  useEffect(() => {
+    if (!justSpawned.length) return;
+    for (const s of justSpawned) openSession(s.file, s.sessionId);
+    consumeSpawned();
+  }, [justSpawned, consumeSpawned]);
 
   const latest = snap ? snap.agents.reduce((mx, a) => Math.max(mx, a.lastActivity), 0) : 0;
   const cutoff = latest - windowH * 3_600_000;

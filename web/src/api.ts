@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ChatMsg, DirListing, Limits, Snapshot, SubagentInfo } from './types';
+import { detectNewlySpawned, type SpawnedSession } from './lib/spawn';
 
 const WS_URL = 'ws://localhost:4177';
 
@@ -69,6 +70,11 @@ export interface Shepherd {
   closeSubagent: () => void;
   /** null while the modal is closed or its first window hasn't arrived yet. */
   subagentModal: { agentId: string; description: string; messages: ChatMsg[] | null } | null;
+  /** Sessions just created via a "+" card whose transcript has now appeared —
+   *  the app opens each so a spawned session shows in the strip immediately.
+   *  Drained via `consumeSpawned` once handled. */
+  justSpawned: SpawnedSession[];
+  consumeSpawned: () => void;
 }
 
 function mergeTail(prev: Loaded | null, sessionId: string, tail: ChatMsg[], offset: number, total: number): Loaded {
@@ -121,6 +127,8 @@ export function useShepherd(): Shepherd {
   // that group's snapshot, on a spawn-error, or after a safety timeout.
   const [spawning, setSpawning] = useState<Map<string, number>>(() => new Map());
   const [spawnErrors, setSpawnErrors] = useState<Map<string, string>>(() => new Map());
+  // Sessions born from a "+" card, waiting to be auto-opened by App.
+  const [justSpawned, setJustSpawned] = useState<SpawnedSession[]>([]);
   const [dirListing, setDirListing] = useState<DirListing | null>(null);
   const [dirListingError, setDirListingError] = useState<string | null>(null);
   const [subagentModal, setSubagentModal] = useState<{
@@ -135,6 +143,10 @@ export function useShepherd(): Shepherd {
   loadedRef.current = loaded;
   const subagentModalRef = useRef(subagentModal);
   subagentModalRef.current = subagentModal;
+  // The onmessage handler is installed once (connect effect has [] deps), so it
+  // reads live spawn requests through a ref rather than a stale closure.
+  const spawningRef = useRef(spawning);
+  spawningRef.current = spawning;
   // Cache the loaded window per session so re-focusing is instant.
   const cache = useRef<Map<string, Loaded>>(new Map());
   // Raw-output listeners for the currently attached terminal — see
@@ -169,6 +181,10 @@ export function useShepherd(): Shepherd {
         if (d.type === 'snapshot') {
           const s = d as Snapshot;
           setSnap(s);
+          // A session created via a "+" card has now appeared — queue it for
+          // the app to open, so it shows in the strip without a canvas detour.
+          const spawned = detectNewlySpawned(s.agents, spawningRef.current);
+          if (spawned.length) setJustSpawned((q) => [...q, ...spawned]);
           setSpawning((prev) => {
             if (!prev.size) return prev;
             let changed = false;
@@ -332,6 +348,10 @@ export function useShepherd(): Shepherd {
     wsSend(wsRef.current, { type: 'listDir', path });
   }, []);
 
+  // App calls this after opening the queued spawned sessions, so each is
+  // auto-opened exactly once (re-opening later is the user's own choice).
+  const consumeSpawned = useCallback(() => setJustSpawned((q) => (q.length ? [] : q)), []);
+
   // Only ever surface the transcript that matches the focused session — a previous
   // session's content must never linger while switching.
   const matches = !!loaded && loaded.sessionId === focusedId;
@@ -357,6 +377,8 @@ export function useShepherd(): Shepherd {
     spawn,
     spawningProducts: new Set(spawning.keys()),
     spawnErrors,
+    justSpawned,
+    consumeSpawned,
     dirListing,
     dirListingError,
     listDir,
