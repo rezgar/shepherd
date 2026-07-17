@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "electron-updater": "^6.3.9",
-    "node-pty": "^1.1.0"
+    "node-pty": "npm:@lydell/node-pty@1.2.0-beta.14"
   },
   "devDependencies": {
     "electron": "^43.1.1",
@@ -28,15 +28,16 @@
       "output": "release"
     },
     "files": [
-      "main.cjs",
+      "**/*",
       "!scripts/**",
       "!build/**"
     ],
     "extraResources": [
       { "from": "build/web", "to": "web" },
       { "from": "build/daemon.cjs", "to": "daemon/daemon.cjs" },
-      { "from": "node_modules/node-pty", "to": "daemon/node_modules/node-pty" }
+      { "from": "build/daemon-modules", "to": "daemon/node_modules" }
     ],
+    "npmRebuild": false,
     "win": {
       "target": "nsis"
     },
