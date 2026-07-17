@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { AgentModel } from '../types';
-import { stripAgents, stripOrder, groupStrip, reorder, type StripState } from './order';
+import { stripAgents, stripOrder, groupStrip, reorder, neighborAfterClose, type StripState } from './order';
 
 const st = (over: Partial<StripState> = {}): StripState => ({
   openedAt: {},
@@ -72,6 +72,23 @@ describe('stripOrder (open-time fallback)', () => {
       'c',
       'q1',
     ]);
+  });
+});
+
+describe('neighborAfterClose', () => {
+  const order = [agent({ sessionId: 'a' }), agent({ sessionId: 'b' }), agent({ sessionId: 'c' })];
+  it('lands on the previous session when closing a middle/last one', () => {
+    expect(neighborAfterClose(order, 'b')?.sessionId).toBe('a');
+    expect(neighborAfterClose(order, 'c')?.sessionId).toBe('b');
+  });
+  it('lands on the next session when closing the first', () => {
+    expect(neighborAfterClose(order, 'a')?.sessionId).toBe('b');
+  });
+  it('returns null when closing the only session (→ caller goes to canvas)', () => {
+    expect(neighborAfterClose([agent({ sessionId: 'x' })], 'x')).toBeNull();
+  });
+  it('returns null when the session is not in the list', () => {
+    expect(neighborAfterClose(order, 'zzz')).toBeNull();
   });
 });
 

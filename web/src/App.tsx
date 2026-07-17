@@ -6,7 +6,7 @@ import { LimitsTracker } from './components/LimitsTracker';
 import { ConnectionBanner } from './components/ConnectionBanner';
 import { NewProjectModal } from './components/NewProjectModal';
 import { groupByProduct } from './lib/format';
-import { stripAgents, stripOrder, groupStrip, reorder, type StripState } from './lib/order';
+import { stripAgents, stripOrder, groupStrip, reorder, neighborAfterClose, type StripState } from './lib/order';
 import { playDone, playError, playNeedsYou, unlockAudio } from './lib/sound';
 import type { AgentModel, AgentState } from './types';
 
@@ -165,17 +165,24 @@ export function App() {
     setOpenedAt((prev) => (sessionId in prev ? prev : { ...prev, [sessionId]: Date.now() }));
     focus(file, sessionId);
   };
-  // Removes a session from the focus-mode strip's explicit-open list —
-  // closing the one you're currently looking at also exits focus mode,
-  // since there's nothing left to show it as "open" for.
+  // Removes a session from the focus-mode strip's explicit-open list. When you
+  // close the session you're viewing, land on a neighbor in the strip — the
+  // previous one, or the next if it was first — instead of dropping back to the
+  // canvas. Only when nothing else is open does it exit focus mode. `openedOrder`
+  // is read at call time (post-render), so it reflects the current strip order.
   const closeOpened = (sessionId: string) => {
+    const wasFocused = sessionId === focusedId;
+    const neighbor = wasFocused ? neighborAfterClose(openedOrder, sessionId) : null;
     setOpenedAt((prev) => {
       if (!(sessionId in prev)) return prev;
       const next = { ...prev };
       delete next[sessionId];
       return next;
     });
-    if (sessionId === focusedId) unfocus();
+    if (wasFocused) {
+      if (neighbor) openSession(neighbor.file, neighbor.sessionId);
+      else unfocus();
+    }
   };
 
   // A session created from a "+" card auto-opens the instant its transcript
