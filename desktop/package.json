@@ -48,7 +48,8 @@
     "publish": {
       "provider": "github",
       "owner": "rezgar",
-      "repo": "shepherd"
+      "repo": "shepherd",
+      "releaseType": "release"
     }
   }
 }
