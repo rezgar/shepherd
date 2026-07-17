@@ -34,7 +34,6 @@ export function App() {
     attachTerminal,
     detachTerminal,
     subscribeTerminal,
-    sendTermInput,
     resizeTerm,
     sendTerminalKey,
     spawn,
@@ -236,7 +235,6 @@ export function App() {
           termError={termError}
           onAttachTerminal={attachTerminal}
           onDetachTerminal={detachTerminal}
-          onSendTermInput={sendTermInput}
           onResizeTerm={resizeTerm}
           onSendTerminalKey={sendTerminalKey}
           limits={limits}

@@ -39,26 +39,19 @@ import '@xterm/xterm/css/xterm.css';
  *  parent render, and listing it would force the terminal to tear down and
  *  rebuild on every render instead of only on a genuine session switch.
  *
- *  Only holds keyboard focus while there's an active text selection —
- *  never otherwise. xterm.js creates a hidden `<textarea>` to capture every
- *  keystroke, and once that textarea has focus it swallows key events
- *  before app-level shortcuts (Alt+N session switching, etc.) ever see
- *  them — confirmed the hard way: clicking into the terminal silently
- *  broke every keyboard shortcut until you clicked back into the composer.
- *  `tabIndex=-1` keeps Tab from landing on it; a `mouseup` listener blurs
- *  it back to nothing UNLESS `term.hasSelection()` is true, releasing focus
- *  after a plain click but keeping it through a text-selection drag.
- *
- *  That selection check has to go through xterm's OWN `hasSelection()` /
- *  `getSelection()` API, not `window.getSelection()` — xterm manages
- *  selection as its own internal model, not real native DOM text
- *  selection, so the browser's selection API never sees it at all.
- *  Confirmed the hard way this mattered: an earlier version blurred on
- *  every `focusin` instead of `mouseup`, which fires at mousedown — before
- *  a drag can even start — and silently broke copy entirely, since
- *  yanking focus away mid-gesture stops xterm's own mousemove-driven
- *  selection tracking from ever registering a selection in the first
- *  place, not just from surviving until Ctrl+C.
+ *  The terminal is INTERACTIVE: it holds keyboard focus so you can just
+ *  type, and every keystroke / paste / control sequence xterm produces is
+ *  forwarded straight to the pty via `onData` — this is Claude Code's own
+ *  native input (arrow-key history, slash-command menus, Esc-to-interrupt),
+ *  replacing the old output-only view + HTML composer. xterm's hidden
+ *  `<textarea>` captures keys before app-level shortcuts, so the one
+ *  shortcut kept alive here is the session-number jump: `Alt+<digit>` is
+ *  passed through (the custom key handler returns false) so it reaches the
+ *  window listener instead of being typed. Ctrl/Cmd+C with an active
+ *  selection is likewise passed through so the browser copies rather than
+ *  xterm sending SIGINT — that check must use xterm's OWN `hasSelection()`,
+ *  since xterm manages selection as its own internal model that the
+ *  browser's `window.getSelection()` never sees.
  *
  *  A fresh attach's replayed scrollback (see attachTerminal's ring-buffer
  *  replay) can render corrupted — words fused together, lines misaligned —
@@ -79,11 +72,19 @@ export function TerminalView({
   subscribeTerminal,
   fontSize,
   onResize,
+  onInput,
+  active,
 }: {
   resetKey: string;
   subscribeTerminal: (onChunk: (chunk: string) => void) => () => void;
   fontSize: number;
   onResize: (cols: number, rows: number) => void;
+  /** Raw terminal input from xterm (keystrokes, paste, control sequences),
+   *  forwarded straight to the session's pty — the native-input path. */
+  onInput: (data: string) => void;
+  /** When false (e.g. a modal is open over the view) the terminal blurs, so
+   *  keystrokes don't leak into the pty behind it. */
+  active: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -94,6 +95,8 @@ export function TerminalView({
   fontSizeRef.current = fontSize;
   const subscribeRef = useRef(subscribeTerminal);
   subscribeRef.current = subscribeTerminal;
+  const onInputRef = useRef(onInput);
+  onInputRef.current = onInput;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -127,20 +130,29 @@ export function TerminalView({
     // Confirmed the hard way this was the actual blocker: even after
     // fixing the focus-yanking bug that stopped selections from forming at
     // all, Ctrl+C with a real selection still copied nothing without this.
+    // Let xterm process keys natively (it forwards them to the pty via onData
+    // below), EXCEPT the two cases the app owns — returning false hands the
+    // event back to the browser / window listeners instead of typing it:
+    //  - Ctrl/Cmd+C with a selection → let the browser copy (xterm would
+    //    otherwise swallow it as SIGINT). Confirmed the hard way this was the
+    //    blocker even after selections were forming correctly.
+    //  - Alt+<digit> → the app's session-number jump, so it still switches
+    //    sessions instead of being typed into the terminal.
     term.attachCustomKeyEventHandler((e) => {
       if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && term.hasSelection()) {
+        return false;
+      }
+      if (e.type === 'keydown' && e.altKey && /^[1-9]$/.test(e.key)) {
         return false;
       }
       return true;
     });
 
-    const helperTextarea = container.querySelector<HTMLTextAreaElement>('.xterm-helper-textarea');
-    if (helperTextarea) helperTextarea.tabIndex = -1;
-    const releaseFocusIfNoSelection = () => {
-      if (term.hasSelection()) return;
-      helperTextarea?.blur();
-    };
-    container.addEventListener('mouseup', releaseFocusIfNoSelection);
+    // Native input: forward every keystroke / paste / control sequence xterm
+    // produces straight to the session's pty, and take focus so you can type
+    // immediately.
+    term.onData((data) => onInputRef.current(data));
+    term.focus();
 
     let nudgeTimer: ReturnType<typeof setTimeout> | undefined;
     let onFirstChunk: (() => void) | null = () => {
@@ -174,7 +186,6 @@ export function TerminalView({
 
     return () => {
       clearTimeout(nudgeTimer);
-      container.removeEventListener('mouseup', releaseFocusIfNoSelection);
       unsubscribe();
       ro.disconnect();
       term.dispose();
@@ -191,6 +202,15 @@ export function TerminalView({
     fit.fit();
     onResizeRef.current(term.cols, term.rows);
   }, [fontSize]);
+
+  // Blur when deactivated (a modal opened over the view) so keys don't leak
+  // into the pty behind it; refocus when it's the active surface again.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    if (active) term.focus();
+    else term.blur();
+  }, [active]);
 
   return <div className="terminal-view" ref={containerRef} />;
 }
