@@ -15,6 +15,16 @@ export const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 const WINDOW_HOURS = Number(process.env.SHEPHERD_WINDOW_HOURS ?? 24);
 export const RECENT_WINDOW_MS = (Number.isFinite(WINDOW_HOURS) ? WINDOW_HOURS : 24) * 3_600_000;
 
+/** Dedicated, never-a-real-project cwd the periodic /usage probe (usage.ts)
+ *  spawns its throwaway sessions in — there's no --json/--print equivalent
+ *  for /usage, so reading the real numbers means launching an actual
+ *  interactive session and scraping its rendered panel, which (confirmed
+ *  the hard way) writes a genuine transcript file just like any other
+ *  session. Excluded here by directory name so those probes never show up
+ *  as bogus agent cards. */
+export const USAGE_PROBE_CWD = path.join(os.tmpdir(), 'agent-shepherd-usage-probe');
+const USAGE_PROBE_DIR_NAME = USAGE_PROBE_CWD.replace(/[:\\/]/g, '-');
+
 /** All session transcript paths under ~/.claude/projects. */
 export async function listSessionFiles(): Promise<string[]> {
   const out: string[] = [];
@@ -25,6 +35,7 @@ export async function listSessionFiles(): Promise<string[]> {
     return out;
   }
   for (const d of dirs) {
+    if (d === USAGE_PROBE_DIR_NAME) continue;
     const full = path.join(PROJECTS_DIR, d);
     let files: string[];
     try {

@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AgentModel, ChatMsg, SubagentInfo } from '../types';
+import type { AgentModel, ChatMsg, Limits, SubagentInfo } from '../types';
 import { CardStrip } from './CardStrip';
 import { TerminalView } from './TerminalView';
 import { TermComposer } from './TermComposer';
 import { SubagentModal } from './SubagentModal';
+import { LimitsTracker } from './LimitsTracker';
 
 export function FocusView({
   agents,
@@ -32,6 +33,7 @@ export function FocusView({
   onSendTerminalKey,
   subscribeTerminal,
   openedAt,
+  limits,
 }: {
   agents: AgentModel[];
   focused: AgentModel;
@@ -59,6 +61,7 @@ export function FocusView({
   onSendTerminalKey: (sessionId: string, cwd: string, key: string) => void;
   subscribeTerminal: (onChunk: (chunk: string) => void) => () => void;
   openedAt: Record<string, number>;
+  limits: Limits | null;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
@@ -184,6 +187,7 @@ export function FocusView({
             )}
           </span>
           <span className="focus__tools">
+            <LimitsTracker limits={limits} />
             <span className="fontctl" title="Terminal font size">
               <button onClick={() => onFontSize(-1)}>A−</button>
               <button onClick={() => onFontSize(1)}>A+</button>
