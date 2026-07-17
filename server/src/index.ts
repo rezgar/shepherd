@@ -6,7 +6,6 @@ import { parseTranscript } from './transcript.js';
 import { attachTerminal, detachTerminal, writeTermInput, resizeTerm, sendTerminalKey, spawnSession, startIdleEvictionSweep, shutdownAllSessions } from './sender.js';
 import { computeLimits, type Limits } from './usage.js';
 import { listDir } from './browse.js';
-import { SummaryManager, makeClaudeRunLlm } from './summarize.js';
 import type { Snapshot } from './types.js';
 
 // This process serves every connected session, not just one — an uncaught
@@ -88,6 +87,20 @@ async function main() {
   let current = snap;
   let currentLimits: Limits | null = null;
   const wss = new WebSocketServer({ port: PORT });
+  // A failed bind (almost always EADDRINUSE — another daemon instance
+  // already holds this port) must exit the process outright, not fall
+  // through to the global uncaughtException handler above: that handler
+  // exists to keep a WORKING daemon up after an unrelated hiccup, not to
+  // let a daemon that never actually started serving requests linger
+  // forever as an invisible zombie. Confirmed the hard way (#71): stacked
+  // port conflicts across many past dev sessions left 19 such zombies
+  // silently running for over a day — unreachable (nothing could ever
+  // connect to them) but still fully scanning ~/.claude/projects and
+  // spawning their own background `claude` processes the whole time.
+  wss.on('error', (err) => {
+    console.error(`[shepherd] failed to bind ws://localhost:${PORT} — exiting rather than running as an unreachable zombie:`, err);
+    process.exit(1);
+  });
   // In-flight sends this daemon spawned, by session id — lets Esc cancel one.
   const inFlight = new Map<string, { cancel: () => void }>();
   console.log(`[shepherd] ws://localhost:${PORT} — watching ${PROJECTS_DIR}`);
@@ -107,28 +120,6 @@ async function main() {
     const data = JSON.stringify(current);
     for (const c of wss.clients) if (c.readyState === 1) c.send(data);
   };
-
-  // Enriches working / just-finished sessions with a conceptual `summary` line
-  // (see summarize.ts). `attach` stamps cached summaries onto the current
-  // agents synchronously and kicks off throttled background refreshes; when one
-  // lands it calls back here to re-stamp and re-broadcast. It only ever sets
-  // `summary`, so state classification is untouched.
-  let applyTimer: NodeJS.Timeout | null = null;
-  const applyAndBroadcast = () => {
-    summaryManager.attach(current.agents, currentLimits);
-    broadcast();
-  };
-  const scheduleApply = () => {
-    if (applyTimer) clearTimeout(applyTimer);
-    applyTimer = setTimeout(applyAndBroadcast, 150);
-  };
-  const summaryManager = new SummaryManager({
-    runLlm: makeClaudeRunLlm(),
-    now: () => Date.now(),
-    onUpdate: scheduleApply,
-  });
-  // Kick off first-pass summaries for whatever's already working at boot.
-  summaryManager.attach(current.agents, currentLimits);
 
   const broadcastLimits = () => {
     if (!currentLimits) return;
@@ -330,7 +321,7 @@ async function main() {
     if (timer) clearTimeout(timer);
     timer = setTimeout(async () => {
       current = await buildSnapshot();
-      applyAndBroadcast();
+      broadcast();
     }, 400);
   };
 
@@ -364,7 +355,7 @@ async function main() {
 
   setInterval(async () => {
     current = await buildSnapshot();
-    applyAndBroadcast();
+    broadcast();
   }, 15_000);
 }
 
