@@ -140,6 +140,14 @@ describe('decideRefresh', () => {
     expect(decideRefresh(prev, a, 1_000 + 30_000, opts)).toBe(true);
   });
 
+  it('holds when the work advanced but the throttle window has NOT elapsed', () => {
+    // Isolates the throttle clause: the signature differs (sig gate passes),
+    // so only `now - prev.ts >= throttleMs` can block — and here it must.
+    const a = mk('working', { activity: 'running tests' });
+    const prev = { sig: 'old sig', text: 'x', ts: 1_000, inFlight: false, lastState: 'working' as const, idleFinalized: false };
+    expect(decideRefresh(prev, a, 1_000 + 5_000, opts)).toBe(false); // changed sig, but 5s < 25s
+  });
+
   it('never refreshes when near a limit, out of slots, or already in flight', () => {
     const a = mk('working');
     expect(decideRefresh(undefined, a, 1_000, { ...opts, nearLimit: true })).toBe(false);
