@@ -33,13 +33,10 @@ export function AgentCard({
   const cur = stageIndex(agent.stage);
   const ago = humAgo(now - agent.lastActivity);
   const name = displayName ?? agent.name;
-  // Prefer the conceptual, model-written summary of what the agent is doing
-  // and how it's going (set only for working / just-finished sessions). Falls
-  // back to the explicit todo's current item, then the heuristic `status` gist
-  // — so needs-you/error cards, and any session without a summary yet, keep
-  // their existing line and the card is never blank. `||` (not `??`) so an
-  // empty summary also falls through.
-  const statusText = agent.summary || agent.taskLine?.current || agent.status;
+  // The explicit todo's current item, falling back to the heuristic `status`
+  // gist — so the card is never blank. `||` (not `??`) so an empty current
+  // item also falls through.
+  const statusText = agent.taskLine?.current || agent.status;
 
   const cls = [
     'card',

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ChatMsg, DirListing, Limits, Snapshot, SubagentInfo } from './types';
 import { detectNewlySpawned, type SpawnedSession } from './lib/spawn';
 
-const WS_URL = 'ws://localhost:4177';
+const WS_URL = import.meta.env.VITE_WS_URL ?? 'ws://localhost:4177';
 
 interface Loaded {
   sessionId: string;

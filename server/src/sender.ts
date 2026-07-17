@@ -98,8 +98,13 @@ const FIND_NEW_SESSION_TIMEOUT_MS = 90_000;
  *  closed to free the process — the terminal-window equivalent of closing a
  *  window you haven't touched in a while. A later send just reopens it,
  *  paying the startup wait once again; nothing about the session itself is
- *  lost, since ground truth always lives in its transcript file. */
-const IDLE_EVICT_MS = 30 * 60_000;
+ *  lost, since ground truth always lives in its transcript file. Shortened
+ *  from 30min (#71): every live PTY competes for the daemon's single event
+ *  loop, and that contention is what makes spawning a *new* session slow —
+ *  fewer idle-but-still-alive PTYs sitting around means less to compete
+ *  with. 10min still comfortably outlasts a normal "reading the response"
+ *  pause. */
+const IDLE_EVICT_MS = 10 * 60_000;
 const EVICT_SWEEP_MS = 5 * 60_000;
 /** Gap between clearing the input line, typing text, and pressing Enter —
  *  each as its OWN `write()` call rather than one concatenated burst.
@@ -113,16 +118,33 @@ const EVICT_SWEEP_MS = 5 * 60_000;
  *  reproduces how a human actually types and reliably submits instead. */
 const TYPE_GAP_MS = 80;
 
+/** typeLine's three writes are meant to land ~TYPE_GAP_MS apart, like a
+ *  human typing — but they're scheduled via setTimeout on the daemon's one
+ *  event loop, so if that loop is busy (many other sessions' PTY output
+ *  draining concurrently) the actual gap can stretch well past what was
+ *  intended, even though every write still eventually happens. That
+ *  stretched timing is a plausible way for the CLI's paste-burst detection
+ *  (see TYPE_GAP_MS's own comment) to misfire in a *different* way than a
+ *  too-fast burst does. This is a measured signal of "the event loop was
+ *  under contention while typing", not a guess — 4x the intended ~160ms
+ *  total is comfortably outside normal scheduling noise. */
+const TYPE_LINE_JITTER_THRESHOLD_MS = TYPE_GAP_MS * 2 * 4;
+
 /** Type a line into a PTY's input box and submit it — clear whatever's
  *  there first (see writeTermInput's doc comment for why it isn't always
  *  empty), then the text, then Enter, each a separate write with a gap.
- *  See TYPE_GAP_MS for why this can't be one concatenated write. */
-async function typeLine(p: IPty, text: string): Promise<void> {
+ *  See TYPE_GAP_MS for why this can't be one concatenated write. Reports
+ *  whether the sequence took much longer than intended — see
+ *  TYPE_LINE_JITTER_THRESHOLD_MS — so a caller confirming this typing
+ *  landed can retry sooner instead of trusting the full budget. */
+async function typeLine(p: IPty, text: string): Promise<{ jittered: boolean }> {
+  const t0 = Date.now();
   p.write('\x01\x0b');
   await new Promise((r) => setTimeout(r, TYPE_GAP_MS));
   p.write(text);
   await new Promise((r) => setTimeout(r, TYPE_GAP_MS));
   p.write('\r');
+  return { jittered: Date.now() - t0 > TYPE_LINE_JITTER_THRESHOLD_MS };
 }
 
 /** Caps how much raw PTY output a session's ring buffer retains for replay
@@ -282,8 +304,13 @@ async function spawnPersistent(sessionId: string, cwd: string): Promise<Persiste
   const idleFor = drainAndTrack(p);
   p.onData((chunk: string) => {
     buffer.push(Buffer.from(chunk, 'utf8'));
+    if (!subscribers.size) return;
+    // Serialize once per chunk, not once per subscriber — a session opened
+    // in multiple browser tabs was re-stringifying the identical payload for
+    // each one.
+    const payload = JSON.stringify({ type: 'termOutput', sessionId, chunk });
     for (const sub of subscribers) {
-      if (sub.readyState === 1) sub.send(JSON.stringify({ type: 'termOutput', sessionId, chunk }));
+      if (sub.readyState === 1) sub.send(payload);
     }
   });
   p.onExit(() => {
@@ -659,8 +686,9 @@ export function spawnSession(
       await waitForPtyQuiet(idleFor);
       // Clear the input line first — see the matching comment on writeTermInput
       // for why it isn't always empty; a harmless no-op on this first attempt.
+      let jittered = false;
       try {
-        await typeLine(p, kickoffText);
+        jittered = (await typeLine(p, kickoffText)).jittered;
       } catch (e) {
         onError(e instanceof Error ? e.message : String(e));
         return;
@@ -676,7 +704,13 @@ export function spawnSession(
         }
       };
 
-      const found = await findNewSessionFile(cwd, before, () => cancelled, retype);
+      const found = await findNewSessionFile(
+        cwd,
+        before,
+        () => cancelled,
+        retype,
+        jittered ? KICKOFF_JITTERED_RETRY_MS : KICKOFF_RETRY_MS,
+      );
       if (found) onSessionId(found.sessionId);
 
       if (!found) {
@@ -704,8 +738,10 @@ export function spawnSession(
       const subscribers = new Set<FocusWsLike>();
       p.onData((chunk: string) => {
         buffer.push(Buffer.from(chunk, 'utf8'));
+        if (!subscribers.size) return;
+        const payload = JSON.stringify({ type: 'termOutput', sessionId: found.sessionId, chunk });
         for (const sub of subscribers) {
-          if (sub.readyState === 1) sub.send(JSON.stringify({ type: 'termOutput', sessionId: found.sessionId, chunk }));
+          if (sub.readyState === 1) sub.send(payload);
         }
       });
       p.onExit(() => {
@@ -764,6 +800,14 @@ export function spawnSession(
  *  session that's already mid-turn. This only fires once genuinely more
  *  than half the total budget has passed with no sign of success. */
 const KICKOFF_RETRY_MS = 45_000;
+/** Retry interval used instead of KICKOFF_RETRY_MS when the initial
+ *  typeLine() call itself measured as jittered (see
+ *  TYPE_LINE_JITTER_THRESHOLD_MS) — concrete evidence the event loop was
+ *  under contention while typing, not just "could be slow to start" like
+ *  the generic case KICKOFF_RETRY_MS is tuned for. Waiting the full 45s on
+ *  a kickoff that's already more likely than usual to have been swallowed
+ *  wastes most of the budget; retry sooner instead. */
+const KICKOFF_JITTERED_RETRY_MS = 10_000;
 
 /** Poll for a transcript file that didn't exist before this spawn and whose
  *  own `cwd` line matches — Claude Code assigns the new session's id itself,
@@ -781,13 +825,17 @@ const KICKOFF_RETRY_MS = 45_000;
  *  input box and merged with the original text.
  *
  *  `retype` re-sends the kickoff (clearing the input line first) every
- *  KICKOFF_RETRY_MS while still waiting — see KICKOFF_RETRY_MS for why the
- *  first attempt alone isn't reliable enough on a fresh launch. */
+ *  `retryIntervalMs` while still waiting — see KICKOFF_RETRY_MS for why the
+ *  first attempt alone isn't reliable enough on a fresh launch. Defaults to
+ *  KICKOFF_RETRY_MS; callers that already have concrete evidence the first
+ *  typeLine() call was itself jittered (see TYPE_LINE_JITTER_THRESHOLD_MS)
+ *  can pass a shorter interval instead of trusting the full budget. */
 async function findNewSessionFile(
   cwd: string,
   before: Set<string>,
   isCancelled: () => boolean,
   retype: () => Promise<void>,
+  retryIntervalMs: number = KICKOFF_RETRY_MS,
 ): Promise<{ file: string; sessionId: string } | null> {
   const deadline = Date.now() + FIND_NEW_SESSION_TIMEOUT_MS;
   const normCwd = cwd.replace(/\\/g, '/').toLowerCase();
@@ -796,7 +844,7 @@ async function findNewSessionFile(
   while (Date.now() < deadline) {
     if (isCancelled()) return null;
     await new Promise((r) => setTimeout(r, 500));
-    if (Date.now() - lastRetypeAt > KICKOFF_RETRY_MS) {
+    if (Date.now() - lastRetypeAt > retryIntervalMs) {
       lastRetypeAt = Date.now();
       await retype();
     }
@@ -812,13 +860,33 @@ async function findNewSessionFile(
       if (before.has(f)) continue;
       try {
         const head = await readFileAsync(f, 'utf8');
-        const firstLine = head.slice(0, 2000).split('\n')[0];
-        const parsed = JSON.parse(firstLine) as { cwd?: string; sessionId?: string };
-        if (parsed.sessionId && parsed.cwd && parsed.cwd.replace(/\\/g, '/').toLowerCase() === normCwd) {
-          return { file: f, sessionId: parsed.sessionId };
+        // The CURRENT Claude Code CLI writes several metadata-only preamble
+        // lines (last-prompt, mode, permission-mode, bridge-session, ...)
+        // before the first line that actually carries `cwd` — confirmed the
+        // hard way (#71): checking only line 0 (the old behavior) matched
+        // NEVER, on ANY poll, for every fresh spawn, because re-polling
+        // doesn't change which line index 0 is — it's a structural fact
+        // about the format, not a "still being written" race the next tick
+        // would resolve. Scan every line in the head instead, stopping at
+        // the first one that actually carries a cwd (whether or not it's
+        // THIS spawn's cwd — once a session's cwd line has been written it
+        // doesn't change, so nothing later in the file needs checking).
+        for (const line of head.slice(0, 8000).split('\n')) {
+          if (!line.trim()) continue;
+          let parsed: { cwd?: string; sessionId?: string };
+          try {
+            parsed = JSON.parse(line);
+          } catch {
+            continue; // line mid-write — try again next poll
+          }
+          if (!parsed.cwd) continue; // preamble line, keep scanning
+          if (parsed.sessionId && parsed.cwd.replace(/\\/g, '/').toLowerCase() === normCwd) {
+            return { file: f, sessionId: parsed.sessionId };
+          }
+          break; // found this file's cwd line and it didn't match — no point scanning further
         }
       } catch {
-        continue; // file mid-write or first line isn't the cwd-bearing one — try again next poll
+        continue; // file unreadable this poll — try again next poll
       }
     }
   }

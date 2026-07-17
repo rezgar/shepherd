@@ -95,7 +95,7 @@ function isSubagentDispatch(name: string): boolean {
 // id isn't in the tool_use input, only in its tool_result text, so we infer
 // it positionally instead of parsing that text).
 
-interface TaskItem {
+export interface TaskItem {
   content: string;
   status: 'pending' | 'in_progress' | 'completed';
 }
@@ -217,15 +217,48 @@ function errorStatus(errorType: string | null): string {
   return ERROR_LABELS[errorType] ?? `error: ${errorType}`;
 }
 
+/** Everything parseSessionRaw extracts from a transcript file — pure facts
+ *  derived only from its content, nothing that depends on "now" or hook
+ *  state. See parseSessionRaw's own doc comment for why this split exists:
+ *  this half is safe to cache by (file, mtime), the classifySession half
+ *  never is. */
+export interface RawSession {
+  file: string;
+  sessionId: string;
+  cwd: string;
+  branch: string | null;
+  title: string | null;
+  permissionMode: string;
+  lastTs: number;
+  firstTs: number;
+  queued: number;
+  lastAssistantText: string;
+  lastAssistantStop: string | null;
+  lastToolName: string;
+  lastToolInput: Record<string, unknown>;
+  lastUserText: string;
+  lastTaskText: string;
+  lastEventKind: string;
+  taskItems: TaskItem[];
+  product: string;
+  repoPath: string;
+  label: string;
+  stage: Stage;
+}
+
 /**
- * Parse one session transcript into an AgentModel.
- * Returns null for transcripts with no real working context (no cwd).
+ * Read and parse one session transcript into its raw, file-derived facts —
+ * the expensive half of what was previously one `parseSession` function,
+ * split out (#71) because it's the ONLY half that's a pure function of file
+ * content: given the same file at the same mtime, it always returns the same
+ * result, so scanAll can safely cache it and skip re-reading/re-parsing a
+ * multi-MB transcript on every rescan when nothing in it has actually
+ * changed. Point-in-time classification (state/status/activity, which also
+ * depend on `now` and live hook state) is deliberately NOT done here — see
+ * classifySession. Returns null for transcripts with no real working context
+ * (no cwd).
  */
-export async function parseSession(
-  file: string,
-  now: number,
-  hook?: HookState,
-): Promise<AgentModel | null> {
+export async function parseSessionRaw(file: string): Promise<RawSession | null> {
   let cwd: string | null = null;
   let branch: string | null = null;
   let sessionId = path.basename(file, '.jsonl');
@@ -352,8 +385,68 @@ export async function parseSession(
   // A worktree names the card; otherwise fall back to the branch (e.g. "main"),
   // never repeat the product name that already heads the lane.
   const label = worktreeLabel !== product ? worktreeLabel : (branch ?? product);
-  const idleMs = lastTs > 0 ? now - lastTs : Number.MAX_SAFE_INTEGER;
   const stage = pickStage(stageSignals);
+
+  return {
+    file,
+    sessionId,
+    cwd,
+    branch,
+    title,
+    permissionMode,
+    lastTs,
+    firstTs,
+    queued,
+    lastAssistantText,
+    lastAssistantStop,
+    lastToolName,
+    lastToolInput,
+    lastUserText,
+    lastTaskText,
+    lastEventKind,
+    taskItems,
+    product,
+    repoPath,
+    label,
+    stage,
+  };
+}
+
+/**
+ * Turn one session's raw, file-derived facts (see parseSessionRaw) into the
+ * point-in-time AgentModel a client sees. Unlike parseSessionRaw, this is
+ * NOT safe to cache — every branch below depends on `now` (idleMs, staleness
+ * windows) and/or live hook state, so the same RawSession legitimately
+ * classifies differently from one call to the next (e.g. ticking from
+ * "working" to "idle" purely because time passed, with no new transcript
+ * line at all). Always run this fresh.
+ */
+export function classifySession(raw: RawSession, now: number, hook?: HookState): AgentModel {
+  const {
+    file,
+    sessionId,
+    cwd,
+    branch,
+    title,
+    permissionMode,
+    lastTs,
+    firstTs,
+    queued,
+    lastAssistantText,
+    lastAssistantStop,
+    lastToolName,
+    lastToolInput,
+    lastUserText,
+    lastTaskText,
+    lastEventKind,
+    taskItems,
+    product,
+    repoPath,
+    label,
+    stage,
+  } = raw;
+
+  const idleMs = lastTs > 0 ? now - lastTs : Number.MAX_SAFE_INTEGER;
   const autoRuns = permissionMode === 'bypassPermissions' || permissionMode === 'acceptEdits';
 
   let state: AgentState;
@@ -494,4 +587,22 @@ export async function parseSession(
     file,
     taskLine: computeTaskLine(taskItems),
   };
+}
+
+/**
+ * Parse one session transcript into an AgentModel — convenience wrapper
+ * combining parseSessionRaw + classifySession for callers that don't need
+ * the raw/classify split's caching benefit (a one-off read, not a scan over
+ * many files on a recurring interval). scanAll uses the two halves directly
+ * instead, to cache the raw half by (file, mtime).
+ * Returns null for transcripts with no real working context (no cwd).
+ */
+export async function parseSession(
+  file: string,
+  now: number,
+  hook?: HookState,
+): Promise<AgentModel | null> {
+  const raw = await parseSessionRaw(file);
+  if (!raw) return null;
+  return classifySession(raw, now, hook);
 }

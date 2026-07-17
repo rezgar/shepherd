@@ -26,6 +26,23 @@ await build({
 });
 console.log('bundled daemon → desktop/build/daemon.cjs');
 
+// 1b. Bundle the raw-transcript-parse worker (#71) as its own entry point —
+//     worker_threads spawns it as a real file at runtime (rawParsePool.ts's
+//     resolveWorkerPath), so it can't just live inside daemon.cjs's own
+//     bundle. Staged as a sibling of daemon.cjs (extraResources in
+//     package.json) so resolveWorkerPath's `path.join(__dirname,
+//     'parseWorker.cjs')` finds it.
+await build({
+  entryPoints: [path.join(repoRoot, 'server', 'src', 'parseWorker.ts')],
+  bundle: true,
+  platform: 'node',
+  format: 'cjs',
+  target: 'node20',
+  outfile: path.join(desktop, 'build', 'parseWorker.cjs'),
+  logLevel: 'info',
+});
+console.log('bundled parse worker → desktop/build/parseWorker.cjs');
+
 // 2. Stage node-pty + its installed platform prebuilt into build/daemon-modules,
 //    which electron-builder ships as the daemon's node_modules (extraResources).
 const modsDir = path.join(desktop, 'build', 'daemon-modules');
