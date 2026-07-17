@@ -1,8 +1,11 @@
 import type { AgentModel } from '../types';
 import { AgentCard } from './AgentCard';
-import { groupByProduct } from '../lib/format';
+import { groupByProductOrdered } from '../lib/format';
 
-/** The persistent product-grouped strip shown across the top of focus mode. */
+/** The persistent product-grouped strip shown across the top of focus mode —
+ *  only the sessions you've explicitly opened (see App's openedAt), ordered
+ *  by when you first opened each one, not by creation time. Re-opening an
+ *  already-listed session doesn't move it — same as a browser tab. */
 export function CardStrip({
   agents,
   focusedId,
@@ -13,6 +16,7 @@ export function CardStrip({
   onHide,
   onSpawn,
   spawningProducts,
+  openedAt,
 }: {
   agents: AgentModel[];
   focusedId: string;
@@ -23,10 +27,11 @@ export function CardStrip({
   onHide: (sessionId: string) => void;
   onSpawn: (product: string) => void;
   spawningProducts: Set<string>;
+  openedAt: Record<string, number>;
 }) {
   return (
     <div className="strip">
-      {groupByProduct(agents).map(([product, ags]) => (
+      {groupByProductOrdered(agents, (a) => openedAt[a.sessionId] ?? 0).map(([product, ags]) => (
         <div className="strip__group" key={product}>
           <div className="strip__tab" style={{ background: colorOf(product), color: '#04121f' }}>
             {product}

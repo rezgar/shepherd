@@ -31,6 +31,7 @@ export function FocusView({
   onResizeTerm,
   onSendTerminalKey,
   subscribeTerminal,
+  openedAt,
 }: {
   agents: AgentModel[];
   focused: AgentModel;
@@ -57,6 +58,7 @@ export function FocusView({
   onResizeTerm: (sessionId: string, cols: number, rows: number) => void;
   onSendTerminalKey: (sessionId: string, cwd: string, key: string) => void;
   subscribeTerminal: (onChunk: (chunk: string) => void) => () => void;
+  openedAt: Record<string, number>;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
@@ -147,6 +149,7 @@ export function FocusView({
         onHide={onHide}
         onSpawn={onSpawn}
         spawningProducts={spawningProducts}
+        openedAt={openedAt}
       />
 
       <div className="focus__main">

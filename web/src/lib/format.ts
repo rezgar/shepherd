@@ -33,6 +33,22 @@ export function groupByProduct(agents: AgentModel[]): [string, AgentModel[]][] {
     .sort((a, b) => a[1][0].createdAt - b[1][0].createdAt);
 }
 
+/** Same product-grouping as groupByProduct, but sessions (and product
+ *  groups) ordered by a caller-supplied key instead of creation time —
+ *  used by the focus-mode top strip, which only shows explicitly-opened
+ *  sessions in the order they were first opened, not created. */
+export function groupByProductOrdered(agents: AgentModel[], orderOf: (a: AgentModel) => number): [string, AgentModel[]][] {
+  const map = new Map<string, AgentModel[]>();
+  for (const a of agents) {
+    const arr = map.get(a.product) ?? [];
+    arr.push(a);
+    map.set(a.product, arr);
+  }
+  return [...map.entries()]
+    .map(([product, ags]): [string, AgentModel[]] => [product, [...ags].sort((a, b) => orderOf(a) - orderOf(b))])
+    .sort((a, b) => orderOf(a[1][0]) - orderOf(b[1][0]));
+}
+
 export function humAgo(ms: number): string {
   if (ms < 0) ms = 0;
   const s = Math.floor(ms / 1000);

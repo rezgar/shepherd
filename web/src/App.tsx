@@ -60,6 +60,11 @@ export function App() {
   const [showHidden, setShowHidden] = useState(false);
   const [muted, setMuted] = useState<boolean>(() => load('shepherd:muted', false));
   const [newProjectOpen, setNewProjectOpen] = useState(false);
+  // sessionId -> when you FIRST opened it in Shepherd — drives the focus-mode
+  // top strip, which shows only sessions you've explicitly opened (not every
+  // active one) in a stable order (re-opening one doesn't move it, same as a
+  // browser tab), instead of every active session sorted by creation time.
+  const [openedAt, setOpenedAt] = useState<Record<string, number>>(() => load('shepherd:openedAt', {}));
 
   useEffect(() => {
     localStorage.setItem('shepherd:font', JSON.stringify(fontSize));
@@ -73,6 +78,9 @@ export function App() {
   useEffect(() => {
     localStorage.setItem('shepherd:muted', JSON.stringify(muted));
   }, [muted]);
+  useEffect(() => {
+    localStorage.setItem('shepherd:openedAt', JSON.stringify(openedAt));
+  }, [openedAt]);
 
   // Browsers suspend audio until a user gesture — warm it up on the first one.
   useEffect(() => {
@@ -134,14 +142,44 @@ export function App() {
       return next;
     });
 
+  // The single path every "go look at this session" action goes through —
+  // records the first-opened timestamp (a no-op if already recorded, so
+  // re-opening never moves its position in the strip) before deferring to
+  // the real focus() from useShepherd.
+  const openSession = (file: string, sessionId: string) => {
+    setOpenedAt((prev) => (sessionId in prev ? prev : { ...prev, [sessionId]: Date.now() }));
+    focus(file, sessionId);
+  };
+  // Removes a session from the focus-mode strip's explicit-open list —
+  // closing the one you're currently looking at also exits focus mode,
+  // since there's nothing left to show it as "open" for.
+  const closeOpened = (sessionId: string) => {
+    setOpenedAt((prev) => {
+      if (!(sessionId in prev)) return prev;
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+    if (sessionId === focusedId) unfocus();
+  };
+
   const latest = snap ? snap.agents.reduce((mx, a) => Math.max(mx, a.lastActivity), 0) : 0;
   const cutoff = latest - windowH * 3_600_000;
   const allVisible = snap ? snap.agents.filter((a) => a.lastActivity >= cutoff) : [];
   const shownVisible = allVisible.filter((a) => !hidden[a.sessionId]);
   const hiddenVisible = allVisible.filter((a) => hidden[a.sessionId]);
   const groups = groupByProduct(shownVisible);
-  // Same shared order the top strip and canvas lanes render in — Alt+N jumps to the Nth card.
+  // Same shared order the canvas lanes render in — Alt+N jumps to the Nth
+  // card there. The focus-mode top strip has its OWN order now (see
+  // openedAgents below) since it only shows explicitly-opened sessions.
   const flatOrder = groups.flatMap(([, ags]) => ags);
+  // Every session in snap.agents (not just shownVisible — an opened session
+  // stays listed even past the active-window cutoff or while hidden from
+  // the canvas, since those are orthogonal to "did I open it"). Always
+  // includes the currently-focused session even on the off chance its
+  // openedAt entry is missing (e.g. localStorage cleared mid-session) —
+  // the strip should never fail to show the card you're actually looking at.
+  const openedAgents = snap ? snap.agents.filter((a) => a.sessionId in openedAt || a.sessionId === focusedId) : [];
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -151,11 +189,11 @@ export function App() {
       const target = flatOrder[n - 1];
       if (!target) return;
       e.preventDefault();
-      focus(target.file, target.sessionId);
+      openSession(target.file, target.sessionId);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [flatOrder, focus]);
+  }, [flatOrder, openSession]);
 
   const banner = !connected && <ConnectionBanner everConnected={everConnectedRef.current} />;
 
@@ -175,19 +213,20 @@ export function App() {
       <div className="focus-shell">
         {banner}
         <FocusView
-          agents={shownVisible}
+          agents={openedAgents}
           focused={focused}
           now={now}
           colorOf={colorOf}
           nameOf={nameOf}
-          onSelect={(a) => focus(a.file, a.sessionId)}
+          onSelect={(a) => openSession(a.file, a.sessionId)}
           onExit={unfocus}
           onRename={rename}
           fontSize={fontSize}
           onFontSize={changeFont}
-          onHide={hide}
+          onHide={closeOpened}
           onSpawn={spawn}
           spawningProducts={spawningProducts}
+          openedAt={openedAt}
           activeSubagents={activeSubagents}
           onSelectSubagent={(s) => openSubagent(focused.file, focused.sessionId, s.agentId, s.description)}
           onCloseSubagent={closeSubagent}
@@ -262,7 +301,7 @@ export function App() {
             agents={agents}
             now={now}
             color={colorOf(product)}
-            onSelect={(a) => focus(a.file, a.sessionId)}
+            onSelect={(a) => openSession(a.file, a.sessionId)}
             nameOf={nameOf}
             onHide={hide}
             onSpawn={spawn}
@@ -299,7 +338,7 @@ export function App() {
           spawnErrors={spawnErrors}
           onFocus={(file, sessionId) => {
             setNewProjectOpen(false);
-            focus(file, sessionId);
+            openSession(file, sessionId);
           }}
         />
       )}
