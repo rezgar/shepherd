@@ -36,7 +36,7 @@ let cachedExe: string | null = null;
  *  CreateProcess (what node-pty uses under the hood) won't run a .cmd
  *  directly, so this reads the shim's own install directory and points at
  *  the .exe it delegates to. No hardcoded per-machine path. */
-function resolveClaudeExecutable(): string {
+export function resolveClaudeExecutable(): string {
   if (cachedExe) return cachedExe;
   const isWin = process.platform === 'win32';
   try {
@@ -59,7 +59,7 @@ function resolveClaudeExecutable(): string {
  *  Claude Code session would leak session-identifying vars that make the
  *  child think it's a nested child session and skip writing its transcript
  *  entirely (found the hard way — confirmed empirically before shipping this). */
-function cleanEnv(): NodeJS.ProcessEnv {
+export function cleanEnv(): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CLAUDE|ANTHROPIC)/i.test(k)));
 }
 

@@ -10,9 +10,9 @@ importers:
 
   server:
     dependencies:
-      ccusage:
-        specifier: ^20.0.17
-        version: 20.0.17
+      '@xterm/headless':
+        specifier: ^6.0.0
+        version: 6.0.0
       chokidar:
         specifier: ^4.0.3
         version: 4.0.3
@@ -169,36 +169,6 @@ packages:
 
   '@braintree/sanitize-url@7.1.2':
     resolution: {integrity: sha512-jigsZK+sMF/cuiB7sERuo9V7N9jx+dhmHHnQyDSVdpZwVutaBu7WvNYqMDLSgFgfB30n452TP3vjDAvFC973mA==}
-
-  '@ccusage/ccusage-darwin-arm64@20.0.17':
-    resolution: {integrity: sha512-rQTuzovMtfbtBAmEMmC8ABzkd66E+jJI+E+WJ/MbEeRTGS/7cL50BpP0jI87FWTbGoY/ovlSV6gcmFyd+EvzXA==}
-    cpu: [arm64]
-    os: [darwin]
-
-  '@ccusage/ccusage-darwin-x64@20.0.17':
-    resolution: {integrity: sha512-FyNVZ1I7LZpkuIXB/pUE+e7OiUeEKKM1h/3Sq0bfq+zZL2SIGmWLTH5RiANcVFIhlEJYE2J2g32z2wy6zYJ9vQ==}
-    cpu: [x64]
-    os: [darwin]
-
-  '@ccusage/ccusage-linux-arm64@20.0.17':
-    resolution: {integrity: sha512-evdCI+3G6tDoXubPFDQju5KNc+fy2NTjZnUs8nBIwh/oYIdo6LVYlB/Tpvf5lz3WLy8+VPfcc0UuXIjY/X1vkg==}
-    cpu: [arm64]
-    os: [linux]
-
-  '@ccusage/ccusage-linux-x64@20.0.17':
-    resolution: {integrity: sha512-o9CFzPbRT+WEyhKV6Y0GUdxcxdrRnToBY7qclXMe+doKon4gjzZvAzHXR6qao/ZHdfg6cmLkGvBJx5ZcG/8bEw==}
-    cpu: [x64]
-    os: [linux]
-
-  '@ccusage/ccusage-win32-arm64@20.0.17':
-    resolution: {integrity: sha512-+cucn4UnhXxd3FQElpAu/k0dgAIN+Sh36dBEfymyuaSHKRvkG7QjbEWkuqsnXwjAy2Z0BIM5uq6gZkrhl0c3aA==}
-    cpu: [arm64]
-    os: [win32]
-
-  '@ccusage/ccusage-win32-x64@20.0.17':
-    resolution: {integrity: sha512-y+rbb5D3lUQwu6kKtRk2yVGZn3Az3+9TipRQAyk9vs+K4hp3TM+ToqciVRAZ3u+tap5VhPSj2bZt4J6gGXg18w==}
-    cpu: [x64]
-    os: [win32]
 
   '@chevrotain/types@11.1.2':
     resolution: {integrity: sha512-U+HFai5+zmJCkK86QsaJtoITlboZHBqrVketcO2ROv865xfCMSFpELQoz1GkX5GzME8pTa+3kbKrZHQtI0gdbw==}
@@ -1015,6 +985,9 @@ packages:
   '@xterm/addon-fit@0.11.0':
     resolution: {integrity: sha512-jYcgT6xtVYhnhgxh3QgYDnnNMYTcf8ElbxxFzX0IZo+vabQqSPAjC3c1wJrKB5E19VwQei89QCiZZP86DCPF7g==}
 
+  '@xterm/headless@6.0.0':
+    resolution: {integrity: sha512-5Yj1QINYCyzrZtf8OFIHi47iQtI+0qYFPHmouEfG8dHNxbZ9Tb9YGSuLcsEwj9Z+OL75GJqPyJbyoFer80a2Hw==}
+
   '@xterm/xterm@6.0.0':
     resolution: {integrity: sha512-TQwDdQGtwwDt+2cgKDLn0IRaSxYu1tSUjgKarSDkUM0ZNiSRXFpjxEsvc/Zgc5kq5omJ+V0a8/kIM2WD3sMOYg==}
 
@@ -1044,10 +1017,6 @@ packages:
 
   ccount@2.0.1:
     resolution: {integrity: sha512-eyrF0jiFpY+3drT6383f1qhkbGsLSifNAjA61IUjZjmLCWjItY6LB9ft9YhoDgwfmclB2zhu51Lc7+95b8NRAg==}
-
-  ccusage@20.0.17:
-    resolution: {integrity: sha512-MJU4qDs6DOMdam0PXWWFgo0dw/kXAK05rX586DdxIARTzj/zJylWfVlIywgJwW094nNbqwJyGRZvzO2ZsczXDg==}
-    hasBin: true
 
   chai@5.3.3:
     resolution: {integrity: sha512-4zNhdJD/iOjSH0A05ea+Ke6MU5mmpQcbQsSOkgdaUMJ9zTlDTD/GYlwohmIE2u0gaxHYiVHEn1Fw9mZ/ktJWgw==}
@@ -2046,24 +2015,6 @@ snapshots:
 
   '@braintree/sanitize-url@7.1.2': {}
 
-  '@ccusage/ccusage-darwin-arm64@20.0.17':
-    optional: true
-
-  '@ccusage/ccusage-darwin-x64@20.0.17':
-    optional: true
-
-  '@ccusage/ccusage-linux-arm64@20.0.17':
-    optional: true
-
-  '@ccusage/ccusage-linux-x64@20.0.17':
-    optional: true
-
-  '@ccusage/ccusage-win32-arm64@20.0.17':
-    optional: true
-
-  '@ccusage/ccusage-win32-x64@20.0.17':
-    optional: true
-
   '@chevrotain/types@11.1.2': {}
 
   '@esbuild/aix-ppc64@0.21.5':
@@ -2646,6 +2597,8 @@ snapshots:
 
   '@xterm/addon-fit@0.11.0': {}
 
+  '@xterm/headless@6.0.0': {}
+
   '@xterm/xterm@6.0.0': {}
 
   assertion-error@2.0.1: {}
@@ -2667,15 +2620,6 @@ snapshots:
   caniuse-lite@1.0.30001805: {}
 
   ccount@2.0.1: {}
-
-  ccusage@20.0.17:
-    optionalDependencies:
-      '@ccusage/ccusage-darwin-arm64': 20.0.17
-      '@ccusage/ccusage-darwin-x64': 20.0.17
-      '@ccusage/ccusage-linux-arm64': 20.0.17
-      '@ccusage/ccusage-linux-x64': 20.0.17
-      '@ccusage/ccusage-win32-arm64': 20.0.17
-      '@ccusage/ccusage-win32-x64': 20.0.17
 
   chai@5.3.3:
     dependencies:

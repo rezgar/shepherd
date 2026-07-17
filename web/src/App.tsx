@@ -239,6 +239,7 @@ export function App() {
           onSendTermInput={sendTermInput}
           onResizeTerm={resizeTerm}
           onSendTerminalKey={sendTerminalKey}
+          limits={limits}
         />
       </div>
     );

@@ -113,9 +113,10 @@ async function main() {
     for (const c of wss.clients) if (c.readyState === 1) c.send(data);
   };
 
-  // ccusage scans every local transcript, so it's not cheap enough to run on
-  // every rescan (400ms debounce) — a slow independent poll is plenty for a
-  // 5h/7d rolling estimate that barely moves minute to minute.
+  // computeLimits() spawns a real throwaway session to read /usage (see
+  // usage.ts) — far too heavy to run on every rescan (400ms debounce); a
+  // slow independent poll is plenty for numbers that barely move minute to
+  // minute.
   const refreshLimits = async () => {
     try {
       currentLimits = await computeLimits();
