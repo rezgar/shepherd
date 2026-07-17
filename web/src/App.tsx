@@ -6,6 +6,7 @@ import { LimitsTracker } from './components/LimitsTracker';
 import { ConnectionBanner } from './components/ConnectionBanner';
 import { NewProjectModal } from './components/NewProjectModal';
 import { groupByProduct } from './lib/format';
+import { stripAgents, stripOrder } from './lib/order';
 import { playDone, playError, playNeedsYou, unlockAudio } from './lib/sound';
 import type { AgentModel, AgentState } from './types';
 
@@ -186,27 +187,36 @@ export function App() {
   // card there. The focus-mode top strip has its OWN order now (see
   // openedAgents below) since it only shows explicitly-opened sessions.
   const flatOrder = groups.flatMap(([, ags]) => ags);
-  // Every session in snap.agents (not just shownVisible — an opened session
-  // stays listed even past the active-window cutoff or while hidden from
-  // the canvas, since those are orthogonal to "did I open it"). Always
-  // includes the currently-focused session even on the off chance its
-  // openedAt entry is missing (e.g. localStorage cleared mid-session) —
-  // the strip should never fail to show the card you're actually looking at.
-  const openedAgents = snap ? snap.agents.filter((a) => a.sessionId in openedAt || a.sessionId === focusedId) : [];
+  // The focus-mode strip: every session you explicitly opened (across the full
+  // snapshot, not just shownVisible — an opened session stays listed even past
+  // the active-window cutoff), minus any you've hidden, plus always the session
+  // you're currently viewing (so the card you're looking at never vanishes from
+  // its own strip even if its openedAt entry is missing). Hiding is
+  // authoritative: a hidden session leaves the strip too, so it stops taking a
+  // slot and can't be reached by the number-jump.
+  const openedAgents = snap ? stripAgents(snap.agents, openedAt, hidden, focusedId) : [];
+  // The strip in its rendered order — the list the number-jump walks in focus
+  // mode, so "the Nth session" matches what you see there (the canvas uses
+  // flatOrder instead).
+  const openedOrder = stripOrder(openedAgents, openedAt);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!e.altKey) return;
       const n = Number(e.key);
       if (n < 1 || n > 9) return;
-      const target = flatOrder[n - 1];
+      // Walk the list you're actually looking at: the strip in focus mode, the
+      // canvas otherwise. Both exclude hidden sessions, so a hidden or closed
+      // session is never number-reachable and can't pop back into the strip.
+      const list = focusedId ? openedOrder : flatOrder;
+      const target = list[n - 1];
       if (!target) return;
       e.preventDefault();
       openSession(target.file, target.sessionId);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [flatOrder, openSession]);
+  }, [flatOrder, openedOrder, focusedId, openSession]);
 
   const banner = !connected && <ConnectionBanner everConnected={everConnectedRef.current} />;
 
