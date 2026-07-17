@@ -20,6 +20,20 @@ export function stripAgents(
   );
 }
 
+/**
+ * After closing `sessionId`, which session to land on: the previous one in the
+ * rendered strip order, else the next, else null (nothing else is open → the
+ * caller returns to the canvas). `order` is the flattened strip order.
+ */
+export function neighborAfterClose<T extends { sessionId: string }>(
+  order: T[],
+  sessionId: string,
+): T | null {
+  const idx = order.findIndex((a) => a.sessionId === sessionId);
+  if (idx < 0) return null;
+  return order[idx - 1] ?? order[idx + 1] ?? null;
+}
+
 /** Manual drag order + the open-time fallback the strip falls back to for
  *  anything not manually placed yet. */
 export interface StripState {
