@@ -142,38 +142,55 @@ export function TerminalView({
     };
     container.addEventListener('mouseup', releaseFocusIfNoSelection);
 
+    // Force the CLI to do a full fresh repaint at the current grid size by
+    // nudging the width one column and back. A same-size resize is a no-op
+    // that triggers no repaint, so the one-column change guarantees a real
+    // change is observed even if term.cols already matches the PTY's current
+    // size. The two sends are spaced apart, not fired back to back — confirmed
+    // the hard way that an instant pair can coalesce into a single net-zero
+    // resize (only the final size ever reaches the pty), which never triggers a
+    // repaint and left a session's terminal completely blank. Guarded against a
+    // degenerate cols/rows (container not laid out yet). Used both after the
+    // first chunk lands (fixes replayed-scrollback garble, #31) and after a
+    // resize settles (fixes mid-session garble when the layout shifts, #45).
     let nudgeTimer: ReturnType<typeof setTimeout> | undefined;
-    let onFirstChunk: (() => void) | null = () => {
-      onFirstChunk = null;
-      // Force a genuine size change so the CLI does a full fresh repaint —
-      // see the doc comment above. Nudging by one column and back
-      // guarantees an actual change is observed even if term.cols already
-      // happens to match the PTY's current size (a same-size resize call
-      // is a no-op that triggers no repaint at all). The two sends are
-      // spaced apart, not fired back to back — confirmed the hard way that
-      // an instant pair can get coalesced into a single net-zero resize
-      // (only the final size ever reaches the pty), which never triggers a
-      // repaint at all and left a session's terminal completely blank.
-      // Guarded against a degenerate cols/rows (possible if the container
-      // hasn't been laid out yet) — nothing useful to nudge in that case.
+    const nudgeRepaint = () => {
       const { cols, rows } = term;
       if (cols < 2 || rows < 1) return;
       onResizeRef.current(cols - 1, rows);
+      clearTimeout(nudgeTimer);
       nudgeTimer = setTimeout(() => onResizeRef.current(cols, rows), 150);
+    };
+
+    let onFirstChunk: (() => void) | null = () => {
+      onFirstChunk = null;
+      nudgeRepaint();
     };
     const unsubscribe = subscribeRef.current((chunk) => {
       term.write(chunk);
       onFirstChunk?.();
     });
 
+    // Coalesce rapid container-size changes (layout thrash — the usage bar
+    // ticking, the strip re-rendering, a window drag) into a single fit + clean
+    // repaint once they settle. Un-debounced (the previous behavior), every
+    // intermediate size was pushed straight to the pty, so in-flight output
+    // wrapped at a width the display kept disagreeing with until a manual font
+    // change forced a repaint (#45). The trailing nudge guarantees the CLI
+    // repaints cleanly at the settled size rather than leaving reflowed garble.
+    let settleTimer: ReturnType<typeof setTimeout> | undefined;
     const ro = new ResizeObserver(() => {
-      fit.fit();
-      onResizeRef.current(term.cols, term.rows);
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(() => {
+        fit.fit();
+        nudgeRepaint();
+      }, 120);
     });
     ro.observe(container);
 
     return () => {
       clearTimeout(nudgeTimer);
+      clearTimeout(settleTimer);
       container.removeEventListener('mouseup', releaseFocusIfNoSelection);
       unsubscribe();
       ro.disconnect();
