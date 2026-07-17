@@ -1,0 +1,47 @@
+name: Desktop release
+
+# Ever-green: every push to main that touches the app builds a fresh Windows
+# executable on a GitHub runner and publishes it as a GitHub Release. The
+# packaged app's auto-updater (electron-updater) then pulls it on next launch.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'desktop/**'
+      - 'web/**'
+      - 'server/**'
+      - '.github/workflows/desktop-release.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write # publish the release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --no-frozen-lockfile
+
+      # Version each build off the run number so the updater always sees "newer".
+      - name: Set version
+        shell: bash
+        run: |
+          node -e "const fs=require('fs');const p=require('./desktop/package.json');p.version='0.1.'+process.env.GITHUB_RUN_NUMBER;fs.writeFileSync('./desktop/package.json',JSON.stringify(p,null,2)+'\n')"
+          echo "version -> 0.1.$GITHUB_RUN_NUMBER"
+
+      - name: Build + publish
+        run: pnpm --filter @shepherd/desktop release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,13 +1,53 @@
 {
   "name": "@shepherd/desktop",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
-  "description": "Electron desktop wrapper for Shepherd — a thin shell over the web UI that ensures the shared daemon is running.",
+  "description": "Electron desktop app for Shepherd — a thin shell over the web UI that ensures the shared daemon is running, packaged and auto-updating from main.",
   "main": "main.cjs",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "build:web": "pnpm --filter @shepherd/web build && node scripts/copy-web.mjs",
+    "build:daemon": "node scripts/bundle-daemon.mjs",
+    "dist": "pnpm run build:web && pnpm run build:daemon && electron-builder",
+    "release": "pnpm run build:web && pnpm run build:daemon && electron-builder --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9",
+    "node-pty": "^1.1.0"
   },
   "devDependencies": {
-    "electron": "^43.1.1"
+    "electron": "^43.1.1",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.2"
+  },
+  "build": {
+    "appId": "com.rezgar.shepherd",
+    "productName": "Shepherd",
+    "artifactName": "Shepherd-Setup-${version}.${ext}",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.cjs",
+      "!scripts/**",
+      "!build/**"
+    ],
+    "extraResources": [
+      { "from": "build/web", "to": "web" },
+      { "from": "build/daemon.cjs", "to": "daemon/daemon.cjs" },
+      { "from": "node_modules/node-pty", "to": "daemon/node_modules/node-pty" }
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "rezgar",
+      "repo": "shepherd"
+    }
   }
 }
