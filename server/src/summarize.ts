@@ -1,0 +1,317 @@
+import { execFile } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
+import type { AgentModel } from './types.js';
+import type { Limits } from './usage.js';
+import { resolveClaudeExecutable, cleanEnv } from './sender.js';
+
+/** A short, fast model is all a one-line status needs; `haiku` resolves to the
+ *  latest Haiku on whatever CLI version is installed, so it never 404s on a
+ *  pinned date. */
+export const SUMMARY_MODEL = 'haiku';
+/** No more than one refresh per session per window — the throttle that keeps a
+ *  grinding session from re-summarizing every scan. */
+const THROTTLE_MS = 25_000;
+/** At most this many `claude -p` calls in flight at once across all sessions,
+ *  so ten working agents don't fork ten CLIs simultaneously. */
+const MAX_CONCURRENT = 2;
+/** Pause summarizing once the account's real usage hits this — the summary is a
+ *  nicety, never worth racing you to your own cap. */
+const NEAR_LIMIT_PCT = 95;
+/** A one-liner should come back fast, but `claude -p` boots the full CLI
+ *  harness (MCP/skills) on every call, so cold starts run tens of seconds;
+ *  past this we give up and the card keeps its fallback line. Runs in the
+ *  background off the scan loop, bounded by the concurrency cap, so a generous
+ *  ceiling costs nothing but a held slot. */
+const LLM_TIMEOUT_MS = 45_000;
+/** Only the tail of a (possibly huge) transcript feeds the prompt. */
+const TAIL_LINES = 24;
+/** Hard cap on the produced status line. */
+const MAX_SUMMARY_CHARS = 120;
+
+export type RunLlm = (prompt: string) => Promise<string>;
+
+interface Entry {
+  /** Activity signature at the last refresh attempt — drives change detection. */
+  sig: string;
+  /** Last successful summary; null until one lands (card falls back meanwhile). */
+  text: string | null;
+  /** Time of the last attempt (success or failure) — drives the throttle. */
+  ts: number;
+  inFlight: boolean;
+  /** State observed on the previous attach — lets us catch working→idle. */
+  lastState: AgentModel['state'];
+  /** Whether the one idle "where it left off" summary has already been done. */
+  idleFinalized: boolean;
+}
+
+/** Cheap proxy for "the work meaningfully advanced": the high-level task plus
+ *  the momentary tool/activity detail. Grinding on one long tool keeps
+ *  `activity` constant → no refresh; moving to a new tool/task changes it →
+ *  refresh. Derived purely from fields the parser already sets, so `parse.ts`
+ *  stays untouched. */
+export function activitySignature(a: AgentModel): string {
+  return `${a.status} ${a.activity}`;
+}
+
+/** True when the account's real session/weekly usage is at or above the pause
+ *  threshold. Null limits (not yet probed) never pause. */
+export function isNearLimit(limits: Limits | null, pct = NEAR_LIMIT_PCT): boolean {
+  if (!limits) return false;
+  const s = limits.session?.percent ?? 0;
+  const w = limits.weekly?.percent ?? 0;
+  return Math.max(s, w) >= pct;
+}
+
+export interface RefreshOpts {
+  throttleMs: number;
+  nearLimit: boolean;
+  slotFree: boolean;
+}
+
+/** The pure heart: given the last known entry for a session and its current
+ *  model, decide whether to spend a summarization call now. */
+export function decideRefresh(
+  prev: Entry | undefined,
+  a: AgentModel,
+  now: number,
+  opts: RefreshOpts,
+): boolean {
+  if (opts.nearLimit || !opts.slotFree || prev?.inFlight) return false;
+
+  if (a.state === 'working') {
+    if (!prev) return true; // first summary — show something as soon as it starts
+    // Retry a still-empty first attempt, but only once the throttle has passed.
+    if (prev.text == null) return now - prev.ts >= opts.throttleMs;
+    // Otherwise: refresh only when the work advanced AND the window elapsed.
+    return prev.sig !== activitySignature(a) && now - prev.ts >= opts.throttleMs;
+  }
+
+  // Exactly one final summary the moment a working session goes idle.
+  if (a.state === 'idle' && prev?.lastState === 'working' && !prev.idleFinalized) {
+    return true;
+  }
+
+  return false;
+}
+
+/** Keep the first non-empty line, drop wrapping quotes and a trailing period,
+ *  collapse whitespace, and cap length — a model occasionally editorializes
+ *  despite the prompt. */
+export function sanitizeSummary(raw: string): string {
+  const firstLine = (raw ?? '').split('\n').map((l) => l.trim()).find((l) => l.length > 0) ?? '';
+  let s = firstLine.replace(/\s+/g, ' ').trim();
+  s = s.replace(/^["'“”`]+|["'“”`]+$/g, '').trim();
+  s = s.replace(/\.$/, '').trim();
+  if (s.length > MAX_SUMMARY_CHARS) s = s.slice(0, MAX_SUMMARY_CHARS - 1).trimEnd() + '…';
+  return s;
+}
+
+/** Compact the tail of a transcript into a few labelled lines for the prompt. */
+async function recentTranscriptText(file: string): Promise<string> {
+  let raw: string;
+  try {
+    raw = await readFile(file, 'utf8');
+  } catch {
+    return '';
+  }
+  const lines = raw.split('\n').filter((l) => l.trim());
+  const tail = lines.slice(-80); // parse a generous tail, then keep the last TAIL_LINES rendered
+  const out: string[] = [];
+  for (const line of tail) {
+    let o: any;
+    try {
+      o = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (o.type === 'user') {
+      if (o.origin?.kind === 'task-notification') continue;
+      const content = o.message?.content;
+      if (Array.isArray(content) && content.some((c: any) => c?.type === 'tool_result')) continue;
+      const t = textOf(content).trim();
+      if (t && !/^\[Request interrupted/i.test(t) && !/^<(local-command|command-)/i.test(t)) {
+        out.push(`You: ${clip(t, 200)}`);
+      }
+    } else if (o.type === 'assistant') {
+      const m = o.message ?? {};
+      const t = textOf(m.content).trim();
+      if (t) out.push(`Agent: ${clip(t, 200)}`);
+      const tools = Array.isArray(m.content) ? m.content.filter((c: any) => c?.type === 'tool_use') : [];
+      for (const c of tools) out.push(`→ ${String(c.name ?? 'tool')} ${clip(toolHint(c.input), 80)}`.trim());
+    }
+  }
+  return out.slice(-TAIL_LINES).join('\n');
+}
+
+function textOf(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((c) => c && (c as any).type === 'text')
+      .map((c) => (c as any).text)
+      .join(' ');
+  }
+  return '';
+}
+
+function toolHint(input: unknown): string {
+  if (!input || typeof input !== 'object') return '';
+  const i = input as Record<string, unknown>;
+  const pick = i.description ?? i.command ?? i.file_path ?? i.path ?? i.pattern ?? '';
+  return typeof pick === 'string' ? pick : '';
+}
+
+function clip(s: string, max: number): string {
+  const one = s.replace(/\s+/g, ' ').trim();
+  return one.length > max ? one.slice(0, max - 1) + '…' : one;
+}
+
+/** Build the summarization prompt for one working (or just-finished) session. */
+export async function buildPrompt(a: AgentModel): Promise<string> {
+  const recent = await recentTranscriptText(a.file);
+  const goal = a.taskLine?.current || a.status || '';
+  const finished = a.state !== 'working';
+  return [
+    `You label what a coding agent is doing for an at-a-glance status card.`,
+    `Write ONE line, at most 12 words, present continuous, plain language.`,
+    finished
+      ? `The agent just STOPPED — say what it finished or is now waiting on.`
+      : `Say WHAT it is doing AND how it is going — call out if it looks stuck or is retrying.`,
+    `No filenames unless they are the point. No quotes. No trailing period. Output only the line.`,
+    goal ? `Its overall task: ${clip(goal, 160)}` : '',
+    recent ? `Recent activity (oldest first):\n${recent}` : '',
+    `Status line:`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+/** The headless print-mode CLI args for a summarization call. Pure, so a test
+ *  can confirm the transport is the local CLI (`-p`, a fast `--model`) with no
+ *  API-key machinery anywhere in sight. */
+export function summaryCliArgs(prompt: string): string[] {
+  return ['-p', prompt, '--model', SUMMARY_MODEL];
+}
+
+/** Production transport: the local Claude CLI in headless print mode, on the
+ *  existing subscription. `cleanEnv()` strips every CLAUDE_/ANTHROPIC_ var, so
+ *  this never depends on (or reads) an API key. */
+export function makeClaudeRunLlm(): RunLlm {
+  return (prompt) =>
+    new Promise<string>((resolve, reject) => {
+      const exe = resolveClaudeExecutable();
+      execFile(
+        exe,
+        summaryCliArgs(prompt),
+        { env: cleanEnv(), timeout: LLM_TIMEOUT_MS, maxBuffer: 1_000_000, windowsHide: true },
+        (err, stdout) => (err ? reject(err) : resolve(String(stdout))),
+      );
+    });
+}
+
+export interface SummaryManagerOpts {
+  runLlm: RunLlm;
+  now: () => number;
+  /** Called after a refresh lands so the daemon can re-broadcast. */
+  onUpdate: () => void;
+  throttleMs?: number;
+  maxConcurrent?: number;
+  nearLimitPct?: number;
+  /** Overridable for tests so no transcript file is needed. */
+  buildPrompt?: (a: AgentModel) => Promise<string>;
+}
+
+/**
+ * Enriches working (and just-finished) sessions with a conceptual, plain-
+ * language `summary`, produced by a fast model over the recent transcript.
+ *
+ * `attach` runs synchronously on every snapshot: it stamps the cached summary
+ * onto each agent and, when a session has meaningfully advanced (throttled,
+ * budget-permitting, within a concurrency cap), kicks off a background refresh.
+ * It never touches state/stage/status/activity — only `summary`.
+ */
+export class SummaryManager {
+  private entries = new Map<string, Entry>();
+  private inFlight = 0;
+  private readonly throttleMs: number;
+  private readonly maxConcurrent: number;
+  private readonly nearLimitPct: number;
+  private readonly runLlm: RunLlm;
+  private readonly now: () => number;
+  private readonly onUpdate: () => void;
+  private readonly makePrompt: (a: AgentModel) => Promise<string>;
+
+  constructor(opts: SummaryManagerOpts) {
+    this.runLlm = opts.runLlm;
+    this.now = opts.now;
+    this.onUpdate = opts.onUpdate;
+    this.throttleMs = opts.throttleMs ?? THROTTLE_MS;
+    this.maxConcurrent = opts.maxConcurrent ?? MAX_CONCURRENT;
+    this.nearLimitPct = opts.nearLimitPct ?? NEAR_LIMIT_PCT;
+    this.makePrompt = opts.buildPrompt ?? buildPrompt;
+  }
+
+  attach(agents: AgentModel[], limits: Limits | null): void {
+    const now = this.now();
+    const nearLimit = isNearLimit(limits, this.nearLimitPct);
+    for (const a of agents) {
+      const prev = this.entries.get(a.sessionId);
+
+      // Surface the cached summary only where it's meaningful: while working, or
+      // on an idle card whose final summary has landed. Everything else (needs-
+      // you, error, un-summarized idle) stays null so the card falls back to its
+      // existing status. Never blank.
+      const showCached =
+        prev?.text != null &&
+        (a.state === 'working' || (a.state === 'idle' && prev.idleFinalized));
+      a.summary = showCached ? prev!.text : null;
+
+      const slotFree = this.inFlight < this.maxConcurrent;
+      if (decideRefresh(prev, a, now, { throttleMs: this.throttleMs, nearLimit, slotFree })) {
+        this.startRefresh(a, now);
+      }
+
+      this.track(a);
+    }
+  }
+
+  private startRefresh(a: AgentModel, now: number): void {
+    const finishingIdle = a.state === 'idle';
+    const entry = this.entries.get(a.sessionId) ?? this.newEntry(a);
+    entry.inFlight = true;
+    entry.sig = activitySignature(a);
+    entry.ts = now;
+    this.entries.set(a.sessionId, entry);
+    this.inFlight++;
+
+    Promise.resolve()
+      .then(() => this.makePrompt(a))
+      .then((prompt) => this.runLlm(prompt))
+      .then((text) => {
+        const clean = sanitizeSummary(text);
+        const e = this.entries.get(a.sessionId);
+        if (e && clean) e.text = clean; // empty → keep last good
+        if (e && finishingIdle) e.idleFinalized = true;
+      })
+      .catch(() => {
+        /* keep last good text; a failed summary must never blank the card or throw */
+      })
+      .finally(() => {
+        const e = this.entries.get(a.sessionId);
+        if (e) e.inFlight = false;
+        this.inFlight = Math.max(0, this.inFlight - 1);
+        this.onUpdate();
+      });
+  }
+
+  private track(a: AgentModel): void {
+    const e = this.entries.get(a.sessionId) ?? this.newEntry(a);
+    if (a.state === 'working') e.idleFinalized = false; // a fresh idle later earns its own final summary
+    e.lastState = a.state;
+    this.entries.set(a.sessionId, e);
+  }
+
+  private newEntry(a: AgentModel): Entry {
+    return { sig: '', text: null, ts: 0, inFlight: false, lastState: a.state, idleFinalized: false };
+  }
+}

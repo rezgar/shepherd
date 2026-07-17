@@ -32,6 +32,9 @@ export interface AgentModel {
   stage: Stage;
   /** High-level card status while working (the current task). */
   status: string;
+  /** Conceptual, model-written line of what the agent is doing and how it's
+   *  going. Set only for working / just-finished sessions; null otherwise. */
+  summary?: string | null;
   /** Granular "doing this instant" detail — focus-view ✽ indicator. */
   activity: string;
   action: ActionKind | null;

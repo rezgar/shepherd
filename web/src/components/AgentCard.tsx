@@ -33,10 +33,13 @@ export function AgentCard({
   const cur = stageIndex(agent.stage);
   const ago = humAgo(now - agent.lastActivity);
   const name = displayName ?? agent.name;
-  // The current task from an explicit todo list, when the session tracks
-  // one, is more precise than the heuristic `status` gist — prefer it. No
-  // checkmarks/next here, card is too narrow; just the one line that matters.
-  const statusText = agent.taskLine?.current ?? agent.status;
+  // Prefer the conceptual, model-written summary of what the agent is doing
+  // and how it's going (set only for working / just-finished sessions). Falls
+  // back to the explicit todo's current item, then the heuristic `status` gist
+  // — so needs-you/error cards, and any session without a summary yet, keep
+  // their existing line and the card is never blank. `||` (not `??`) so an
+  // empty summary also falls through.
+  const statusText = agent.summary || agent.taskLine?.current || agent.status;
 
   const cls = [
     'card',
