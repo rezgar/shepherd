@@ -1,5 +1,5 @@
 {
-  "name": "agent-shepherd",
+  "name": "shepherd",
   "version": "0.0.1",
   "private": true,
   "description": "A spatial cockpit for many parallel Claude Code agents",

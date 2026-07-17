@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Claude Code hook handler for Agent Shepherd.
+// Claude Code hook handler for Shepherd.
 //
 // Claude Code invokes this on session events and pipes the event JSON on stdin.
 // We map the event to an exact agent state and write a tiny per-session file to

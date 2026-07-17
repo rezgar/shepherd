@@ -1,4 +1,4 @@
-# 🐑 Agent Shepherd
+# 🐑 Shepherd
 
 A spatial cockpit for many parallel Claude Code agents. Rides your existing Claude Code CLI (subscription auth) — it does **not** call the API directly.
 

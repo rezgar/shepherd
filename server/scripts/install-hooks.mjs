@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Merge Agent Shepherd's hooks into ~/.claude/settings.json (idempotent, backed
+// Merge Shepherd's hooks into ~/.claude/settings.json (idempotent, backed
 // up). Explicit and opt-in — run `pnpm setup:hooks`. Undo by deleting the
 // shepherd-hook entries (or restoring the .shepherd-backup).
 

@@ -256,7 +256,7 @@ export function App() {
     return (
       <div className="shell">
         {banner}
-        <div className="empty">{connected ? 'No sessions found.' : 'Connecting to shepherd daemon…'}</div>
+        <div className="empty">{connected ? 'No sessions found.' : 'Connecting to Shepherd daemon…'}</div>
       </div>
     );
   }
@@ -309,7 +309,7 @@ export function App() {
     <div className="shell">
       {banner}
       <header className="topbar">
-        <span className="brand">🐑 Agent Shepherd</span>
+        <span className="brand">🐑 Shepherd</span>
         <span className="counts">
           {shownVisible.length} agents · <b className="c-work">{working} working</b>
           {needsYou > 0 && (
