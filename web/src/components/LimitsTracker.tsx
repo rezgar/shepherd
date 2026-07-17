@@ -20,15 +20,15 @@ function Bar({ label, percent, resetMs }: { label: string; percent: number; rese
   );
 }
 
-/** Claude Code's own 5h/weekly usage bars — the account's real enforced
- *  percentages, read straight from /usage itself (see server/src/usage.ts),
- *  not a local estimate. */
+/** Claude Code's own weekly usage bar — the account's real enforced
+ *  percentage, read straight from /usage itself (see server/src/usage.ts),
+ *  not a local estimate. The 5h/session bar is deliberately not shown; the
+ *  weekly limit is the one that gates longer work. */
 export function LimitsTracker({ limits }: { limits: Limits | null }) {
-  if (!limits || (!limits.session && !limits.weekly)) return null;
+  if (!limits || !limits.weekly) return null;
   return (
     <div className="limits">
-      {limits.session && <Bar label="5h" percent={limits.session.percent} resetMs={limits.session.resetMs} />}
-      {limits.weekly && <Bar label="week" percent={limits.weekly.percent} resetMs={limits.weekly.resetMs} />}
+      <Bar label="week" percent={limits.weekly.percent} resetMs={limits.weekly.resetMs} />
     </div>
   );
 }
