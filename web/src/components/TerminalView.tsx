@@ -123,18 +123,43 @@ export function TerminalView({
     fitRef.current = fit;
 
     // Let xterm process keys natively (it forwards them to the pty via onData
-    // below), EXCEPT the two cases the app owns — returning false hands the
-    // event back to the browser / window listeners instead of typing it:
+    // below), EXCEPT the cases the app owns — returning false hands the event
+    // back to the browser / window listeners instead of typing it:
     //  - Ctrl/Cmd+C with a selection → let the browser copy (xterm would
     //    otherwise swallow it as SIGINT). Confirmed the hard way this was the
     //    blocker even after selections were forming correctly.
+    //  - Ctrl/Cmd+V → paste the clipboard into the input. xterm would send a
+    //    bare Ctrl+V (0x16) otherwise; instead we read the clipboard and feed
+    //    it through `term.paste`, which brackets it so the CLI inserts it
+    //    literally (newlines preserved, nothing submitted).
+    //  - Shift+Enter → insert a newline instead of submitting. A bare CR can't
+    //    be told apart from a submit, so we paste a bracketed "\n", which the
+    //    CLI inserts as a soft newline in the input.
     //  - Alt+<digit> → the app's session-number jump, so it still switches
     //    sessions instead of being typed into the terminal.
     term.attachCustomKeyEventHandler((e) => {
-      if (e.type === 'keydown' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && term.hasSelection()) {
+      if (e.type !== 'keydown') return true;
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c' && term.hasSelection()) {
         return false;
       }
-      if (e.type === 'keydown' && e.altKey && /^[1-9]$/.test(e.key)) {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
+        e.preventDefault();
+        navigator.clipboard
+          .readText()
+          .then((text) => {
+            if (text) term.paste(text);
+          })
+          .catch(() => {
+            /* clipboard blocked (no permission / insecure context) — no-op */
+          });
+        return false;
+      }
+      if (e.shiftKey && e.key === 'Enter') {
+        e.preventDefault();
+        term.paste('\n');
+        return false;
+      }
+      if (e.altKey && /^[1-9]$/.test(e.key)) {
         return false;
       }
       return true;
