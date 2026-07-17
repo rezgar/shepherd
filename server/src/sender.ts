@@ -860,13 +860,33 @@ async function findNewSessionFile(
       if (before.has(f)) continue;
       try {
         const head = await readFileAsync(f, 'utf8');
-        const firstLine = head.slice(0, 2000).split('\n')[0];
-        const parsed = JSON.parse(firstLine) as { cwd?: string; sessionId?: string };
-        if (parsed.sessionId && parsed.cwd && parsed.cwd.replace(/\\/g, '/').toLowerCase() === normCwd) {
-          return { file: f, sessionId: parsed.sessionId };
+        // The CURRENT Claude Code CLI writes several metadata-only preamble
+        // lines (last-prompt, mode, permission-mode, bridge-session, ...)
+        // before the first line that actually carries `cwd` — confirmed the
+        // hard way (#71): checking only line 0 (the old behavior) matched
+        // NEVER, on ANY poll, for every fresh spawn, because re-polling
+        // doesn't change which line index 0 is — it's a structural fact
+        // about the format, not a "still being written" race the next tick
+        // would resolve. Scan every line in the head instead, stopping at
+        // the first one that actually carries a cwd (whether or not it's
+        // THIS spawn's cwd — once a session's cwd line has been written it
+        // doesn't change, so nothing later in the file needs checking).
+        for (const line of head.slice(0, 8000).split('\n')) {
+          if (!line.trim()) continue;
+          let parsed: { cwd?: string; sessionId?: string };
+          try {
+            parsed = JSON.parse(line);
+          } catch {
+            continue; // line mid-write — try again next poll
+          }
+          if (!parsed.cwd) continue; // preamble line, keep scanning
+          if (parsed.sessionId && parsed.cwd.replace(/\\/g, '/').toLowerCase() === normCwd) {
+            return { file: f, sessionId: parsed.sessionId };
+          }
+          break; // found this file's cwd line and it didn't match — no point scanning further
         }
       } catch {
-        continue; // file mid-write or first line isn't the cwd-bearing one — try again next poll
+        continue; // file unreadable this poll — try again next poll
       }
     }
   }

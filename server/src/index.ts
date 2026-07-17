@@ -24,7 +24,7 @@ process.on('unhandledRejection', (reason) => {
   console.error('[shepherd] unhandled rejection (daemon stays up):', reason);
 });
 
-const PORT = 4177;
+const PORT = Number(process.env.SHEPHERD_PORT ?? 4177);
 
 const STATE_ORDER = { error: 0, 'needs-you': 1, working: 2, idle: 3 } as const;
 
