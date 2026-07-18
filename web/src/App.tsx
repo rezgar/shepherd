@@ -42,6 +42,7 @@ export function App() {
     spawnErrors,
     justSpawned,
     consumeSpawned,
+    setPinnedSessions,
     dirListing,
     dirListingError,
     listDir,
@@ -215,6 +216,15 @@ export function App() {
   // slot and can't be reached by the number-jump.
   const openedAgents = snap ? stripAgents(snap.agents, openedAt, hidden, focusedId) : [];
   const stripState: StripState = { openedAt, productOrder, sessionOrder };
+  // Pin every session in the strip against idle eviction (#73) — a session
+  // parked there should never need a respawn just for having gone quiet.
+  // Keyed on a joined, sorted id string (not `openedAgents` itself, a fresh
+  // array every render) so this effect only actually fires when the set of
+  // opened sessions changes, not on every tick.
+  const openedSessionIdsKey = openedAgents.map((a) => a.sessionId).sort().join(',');
+  useEffect(() => {
+    setPinnedSessions(openedSessionIdsKey ? openedSessionIdsKey.split(',') : []);
+  }, [openedSessionIdsKey, setPinnedSessions]);
   // The strip in its rendered order — the list the number-jump walks in focus
   // mode, so "the Nth session" matches what you see there (the canvas uses
   // flatOrder instead). Follows the manual drag order.

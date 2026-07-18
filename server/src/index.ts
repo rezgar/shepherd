@@ -3,7 +3,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import chokidar from 'chokidar';
 import { scanAll, PROJECTS_DIR } from './scan.js';
 import { parseTranscript } from './transcript.js';
-import { attachTerminal, detachTerminal, writeTermInput, resizeTerm, sendTerminalKey, spawnSession, startIdleEvictionSweep, shutdownAllSessions } from './sender.js';
+import { attachTerminal, detachTerminal, writeTermInput, resizeTerm, sendTerminalKey, spawnSession, startIdleEvictionSweep, shutdownAllSessions, pinSession, unpinSession, unpinAllForConnection } from './sender.js';
 import { computeLimits, type Limits } from './usage.js';
 import { listDir } from './browse.js';
 import type { Snapshot } from './types.js';
@@ -199,6 +199,7 @@ async function main() {
   wss.on('connection', (ws: FocusWs) => {
     ws.on('close', () => {
       if (ws.termSession) detachTerminal(ws.termSession, ws);
+      unpinAllForConnection(ws);
     });
     ws.send(JSON.stringify(current));
     if (currentLimits) ws.send(JSON.stringify({ type: 'limits', ...currentLimits }));
@@ -296,6 +297,10 @@ async function main() {
             if (spawnedId) inFlight.delete(spawnedId);
           },
         );
+      } else if (m.type === 'pinSession' && typeof m.sessionId === 'string') {
+        pinSession(m.sessionId, ws);
+      } else if (m.type === 'unpinSession' && typeof m.sessionId === 'string') {
+        unpinSession(m.sessionId, ws);
       } else if (m.type === 'listDir') {
         const agentsForRoot = current.agents.map((a) => ({ repoPath: a.repoPath, lastActivity: a.lastActivity }));
         void listDir(typeof m.path === 'string' ? m.path : undefined, agentsForRoot)

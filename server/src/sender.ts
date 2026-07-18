@@ -255,6 +255,54 @@ async function waitForPtyQuiet(idleFor: () => number): Promise<void> {
 /** Live, ready-for-input PTYs, one per session — the actual "terminal
  *  window" a send reuses instead of opening a fresh one each time. */
 const readyPtys = new Map<string, PersistentPty>();
+/** Sessions currently "pinned" by a client — e.g. shown in the focus-mode
+ *  card strip (#73) — exempting them from idle eviction regardless of
+ *  `lastActivity`. Ref-counted by WS connection (a Set, not a boolean) so
+ *  the same session open in two browser tabs isn't evicted the moment
+ *  either ONE of them navigates away; only once every pinning connection
+ *  has unpinned (or disconnected) does it fall back under the normal idle
+ *  timer. Deliberately independent of `readyPtys`: a session can be pinned
+ *  before its PTY has ever been spawned (a fresh page load restoring a
+ *  previously-open strip, before anything's been attached to yet), and the
+ *  pin must still protect it once it does spawn. */
+const pinnedSessions = new Map<string, Set<FocusWsLike>>();
+
+/** Pin a session against idle eviction on behalf of one WS connection —
+ *  called when a session enters that connection's focus strip. Idempotent. */
+export function pinSession(sessionId: string, ws: FocusWsLike): void {
+  let set = pinnedSessions.get(sessionId);
+  if (!set) {
+    set = new Set();
+    pinnedSessions.set(sessionId, set);
+  }
+  set.add(ws);
+}
+
+/** Release one connection's pin — called when a session leaves that
+ *  connection's focus strip. The session stays protected as long as any
+ *  OTHER connection still has it pinned; only once the set empties does it
+ *  become eligible for idle eviction again. */
+export function unpinSession(sessionId: string, ws: FocusWsLike): void {
+  const set = pinnedSessions.get(sessionId);
+  if (!set) return;
+  set.delete(ws);
+  if (!set.size) pinnedSessions.delete(sessionId);
+}
+
+/** Release every pin a connection holds — called when it disconnects, so a
+ *  closed tab doesn't protect sessions forever. Small map, infrequent event
+ *  (a WS close), so an O(n) sweep over currently-pinned sessions is fine. */
+export function unpinAllForConnection(ws: FocusWsLike): void {
+  for (const [sessionId, set] of pinnedSessions) {
+    if (set.delete(ws) && !set.size) pinnedSessions.delete(sessionId);
+  }
+}
+
+/** Whether any connection currently has this session pinned — what the idle
+ *  eviction sweep checks; exported for that check's own test coverage. */
+export function isPinned(sessionId: string): boolean {
+  return !!pinnedSessions.get(sessionId)?.size;
+}
 /** In-progress spawns, keyed by session id — de-dupes concurrent sends to a
  *  not-yet-open session so two rapid-fire messages don't each spawn their
  *  own process and fight over which one is "the" session PTY. */
@@ -895,12 +943,16 @@ async function findNewSessionFile(
 
 /** Close any session PTY that's sat idle (no send through Shepherd) longer
  *  than IDLE_EVICT_MS — the terminal-window equivalent of closing a window
- *  you haven't touched in a while. Call once at daemon startup to start the
- *  recurring sweep. */
+ *  you haven't touched in a while. Skips any session currently pinned
+ *  (#73) — e.g. shown in a client's focus-mode card strip — regardless of
+ *  how long it's been idle; a session visibly parked in the strip should
+ *  never need a respawn just for having been quiet a while. Call once at
+ *  daemon startup to start the recurring sweep. */
 export function startIdleEvictionSweep(): void {
   setInterval(() => {
     const now = Date.now();
     for (const [sessionId, entry] of readyPtys) {
+      if (isPinned(sessionId)) continue;
       if (now - entry.lastActivity > IDLE_EVICT_MS) {
         readyPtys.delete(sessionId);
         void gracefulClose(entry.pty);

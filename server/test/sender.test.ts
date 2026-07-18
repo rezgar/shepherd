@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { AsyncLock, RingBuffer } from '../src/sender.js';
+import { AsyncLock, RingBuffer, pinSession, unpinSession, unpinAllForConnection, isPinned } from '../src/sender.js';
+
+function fakeWs() {
+  return { readyState: 1, send: () => {} };
+}
 
 describe('RingBuffer', () => {
   it('replays everything written so far, in order, under the cap', () => {
@@ -57,5 +61,59 @@ describe('AsyncLock', () => {
     await expect(a).rejects.toThrow('boom');
     await b;
     expect(order).toEqual(['a', 'b']);
+  });
+});
+
+describe('pinSession / unpinSession / unpinAllForConnection (#73)', () => {
+  it('is not pinned until a connection pins it', () => {
+    expect(isPinned('s1')).toBe(false);
+  });
+
+  it('pinning marks it pinned; unpinning the same connection releases it', () => {
+    const ws = fakeWs();
+    pinSession('s2', ws);
+    expect(isPinned('s2')).toBe(true);
+    unpinSession('s2', ws);
+    expect(isPinned('s2')).toBe(false);
+  });
+
+  it('stays pinned while ANY connection still holds it, even after another unpins', () => {
+    const wsA = fakeWs();
+    const wsB = fakeWs();
+    pinSession('s3', wsA);
+    pinSession('s3', wsB);
+    unpinSession('s3', wsA);
+    expect(isPinned('s3')).toBe(true); // wsB still has it
+    unpinSession('s3', wsB);
+    expect(isPinned('s3')).toBe(false);
+  });
+
+  it('unpinning a connection that never pinned it is a harmless no-op', () => {
+    const ws = fakeWs();
+    expect(() => unpinSession('never-pinned', ws)).not.toThrow();
+    expect(isPinned('never-pinned')).toBe(false);
+  });
+
+  it('pinning the same session twice from the same connection is idempotent', () => {
+    const ws = fakeWs();
+    pinSession('s4', ws);
+    pinSession('s4', ws);
+    unpinSession('s4', ws);
+    expect(isPinned('s4')).toBe(false); // one unpin fully releases it, no leftover ref
+  });
+
+  it('unpinAllForConnection releases every session a connection pinned, leaving others alone', () => {
+    const wsA = fakeWs();
+    const wsB = fakeWs();
+    pinSession('s5', wsA);
+    pinSession('s6', wsA);
+    pinSession('s6', wsB); // wsB also pins s6
+    pinSession('s7', wsB);
+
+    unpinAllForConnection(wsA);
+
+    expect(isPinned('s5')).toBe(false); // only wsA had it
+    expect(isPinned('s6')).toBe(true); // wsB still holds it
+    expect(isPinned('s7')).toBe(true); // untouched, wsA never pinned it
   });
 });

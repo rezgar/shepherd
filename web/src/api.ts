@@ -75,6 +75,11 @@ export interface Shepherd {
    *  Drained via `consumeSpawned` once handled. */
   justSpawned: SpawnedSession[];
   consumeSpawned: () => void;
+  /** Tell the daemon which sessions are currently shown in the focus strip
+   *  (#73) — pinned sessions are exempt from idle eviction. Pass the FULL
+   *  current set each time (not a delta); this diffs against what was
+   *  previously pinned and sends only pin/unpin for what actually changed. */
+  setPinnedSessions: (sessionIds: string[]) => void;
 }
 
 function mergeTail(prev: Loaded | null, sessionId: string, tail: ChatMsg[], offset: number, total: number): Loaded {
@@ -152,6 +157,10 @@ export function useShepherd(): Shepherd {
   // Raw-output listeners for the currently attached terminal — see
   // `subscribeTerminal`'s doc comment for why this bypasses React state.
   const termListeners = useRef<Set<(chunk: string) => void>>(new Set());
+  // Sessions currently pinned against idle eviction (#73) — the daemon's own
+  // pin registry lives per-WS-connection, so a reconnect needs to re-send
+  // pins for everything still open; this ref is what onopen replays.
+  const pinnedRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let stopped = false;
@@ -170,6 +179,11 @@ export function useShepherd(): Shepherd {
         // for the WS-drops-while-focused case, not worth widening focus()'s
         // signature for.
         if (focusRef.current) wsSend(ws, { type: 'focus', ...focusRef.current });
+        // The daemon's pin registry is per-connection (sender.ts) — a fresh
+        // connection after a drop starts with none of this client's pins,
+        // so replay the full current set rather than leaving them
+        // unprotected until the next `setPinnedSessions` call happens to fire.
+        for (const sessionId of pinnedRef.current) wsSend(ws, { type: 'pinSession', sessionId });
       };
       ws.onmessage = (e) => {
         let d: any;
@@ -348,6 +362,17 @@ export function useShepherd(): Shepherd {
     wsSend(wsRef.current, { type: 'listDir', path });
   }, []);
 
+  // Diffs against the previously-pinned set and sends only the delta — App
+  // calls this with the full current strip on every change, not just what's
+  // new, so this is what turns "the whole set" into "what actually changed".
+  const setPinnedSessions = useCallback((sessionIds: string[]) => {
+    const next = new Set(sessionIds);
+    const prev = pinnedRef.current;
+    for (const id of next) if (!prev.has(id)) wsSend(wsRef.current, { type: 'pinSession', sessionId: id });
+    for (const id of prev) if (!next.has(id)) wsSend(wsRef.current, { type: 'unpinSession', sessionId: id });
+    pinnedRef.current = next;
+  }, []);
+
   // App calls this after opening the queued spawned sessions, so each is
   // auto-opened exactly once (re-opening later is the user's own choice).
   const consumeSpawned = useCallback(() => setJustSpawned((q) => (q.length ? [] : q)), []);
@@ -379,6 +404,7 @@ export function useShepherd(): Shepherd {
     spawnErrors,
     justSpawned,
     consumeSpawned,
+    setPinnedSessions,
     dirListing,
     dirListingError,
     listDir,
