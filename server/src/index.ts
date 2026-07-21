@@ -1,3 +1,4 @@
+import http from 'node:http';
 import path from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import chokidar from 'chokidar';
@@ -24,6 +25,11 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const PORT = Number(process.env.SHEPHERD_PORT ?? 4177);
+/** The app version this daemon belongs to, injected by the desktop shell when
+ *  it spawns the daemon. The shell reads it back via `GET /version` to decide
+ *  whether a still-running daemon is stale after an app update and must be
+ *  recycled (see desktop/main.cjs `ensureDaemon`). `dev` when run standalone. */
+const DAEMON_VERSION = process.env.SHEPHERD_VERSION ?? 'dev';
 
 const STATE_ORDER = { error: 0, 'needs-you': 1, working: 2, idle: 3 } as const;
 
@@ -86,7 +92,48 @@ async function main() {
 
   let current = snap;
   let currentLimits: Limits | null = null;
-  const wss = new WebSocketServer({ port: PORT });
+
+  // Close every session's live PTY before exiting — otherwise a restart
+  // (including the supervisor's own auto-restart-on-crash, or the desktop
+  // shell recycling a stale daemon after an app update) leaves orphaned
+  // `claude` processes behind instead of a clean handoff.
+  let shuttingDown = false;
+  const shutdown = () => {
+    if (shuttingDown) return; // /shutdown + a signal could both fire
+    shuttingDown = true;
+    void shutdownAllSessions().finally(() => process.exit(0));
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
+
+  // A tiny HTTP control surface shares the WS port. `GET /version` lets the
+  // desktop shell tell whether a still-running daemon is stale after an app
+  // update; `POST /shutdown` lets it recycle that daemon *gracefully* (Windows
+  // has no real SIGTERM-to-another-process, so an in-process endpoint is the
+  // only way to run the PTY cleanup above rather than hard-killing and orphaning
+  // `claude` children). `/shutdown` is localhost-only so nothing off-box can
+  // kill the daemon; `/version` is harmless and left open.
+  const httpServer = http.createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/version') {
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ version: DAEMON_VERSION }));
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/shutdown') {
+      const remote = req.socket.remoteAddress ?? '';
+      const isLocal = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+      if (!isLocal) {
+        res.statusCode = 403;
+        res.end('forbidden');
+        return;
+      }
+      res.end('ok');
+      shutdown();
+      return;
+    }
+    res.statusCode = 404;
+    res.end();
+  });
   // A failed bind (almost always EADDRINUSE — another daemon instance
   // already holds this port) must exit the process outright, not fall
   // through to the global uncaughtException handler above: that handler
@@ -97,24 +144,24 @@ async function main() {
   // silently running for over a day — unreachable (nothing could ever
   // connect to them) but still fully scanning ~/.claude/projects and
   // spawning their own background `claude` processes the whole time.
-  wss.on('error', (err) => {
+  httpServer.on('error', (err) => {
     console.error(`[shepherd] failed to bind ws://localhost:${PORT} — exiting rather than running as an unreachable zombie:`, err);
     process.exit(1);
   });
+  const wss = new WebSocketServer({ server: httpServer });
+  wss.on('error', (err) => {
+    // Per-server WS errors (not the bind, which lands on httpServer above) —
+    // log and stay up rather than take the daemon down.
+    console.error('[shepherd] websocket server error (daemon stays up):', err);
+  });
+  httpServer.listen(PORT, () => {
+    console.log(`[shepherd] ws://localhost:${PORT} (v${DAEMON_VERSION}) — watching ${PROJECTS_DIR}`);
+    console.log(`[shepherd] ${current.agents.length} agents at boot`);
+  });
   // In-flight sends this daemon spawned, by session id — lets Esc cancel one.
   const inFlight = new Map<string, { cancel: () => void }>();
-  console.log(`[shepherd] ws://localhost:${PORT} — watching ${PROJECTS_DIR}`);
-  console.log(`[shepherd] ${current.agents.length} agents at boot`);
 
   startIdleEvictionSweep();
-  // Close every session's live PTY before exiting — otherwise a restart
-  // (including the supervisor's own auto-restart-on-crash) leaves orphaned
-  // `claude` processes behind instead of a clean handoff.
-  const shutdown = () => {
-    void shutdownAllSessions().finally(() => process.exit(0));
-  };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
 
   const broadcast = () => {
     const data = JSON.stringify(current);
