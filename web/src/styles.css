@@ -547,8 +547,13 @@ body {
   justify-content: center;
   overflow: hidden;
   background: rgba(1, 4, 9, 0.86);
+  touch-action: none; /* we handle pinch/pan ourselves; don't let the browser zoom */
 }
 .xterm-artifact-modal__stage {
+  /* A definite size so an SVG child (which has no intrinsic size, only a viewBox)
+   * has something to fill — otherwise it collapses to nothing in the flexbox. */
+  width: 90vw;
+  height: 90vh;
   transform-origin: center center;
   will-change: transform;
   cursor: grab;
@@ -560,12 +565,21 @@ body {
 .xterm-artifact-modal__stage:active {
   cursor: grabbing;
 }
-.xterm-artifact-modal__content {
-  max-width: 90vw !important;
-  max-height: 90vh !important;
-  width: auto !important;
-  height: auto !important;
-  background: #0d1117;
+/* Diagrams: fill the stage; the viewBox preserves aspect. !important overrides the
+ * inline max-width mermaid stamps on its SVG (which would keep it tiny). */
+.xterm-artifact-modal__stage > svg {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+}
+/* Images: fit within the stage, keep aspect. */
+.xterm-artifact-modal__stage > img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
 }
 .xterm-artifact-modal__close {
   position: fixed;
@@ -582,6 +596,33 @@ body {
   cursor: pointer;
 }
 .xterm-artifact-modal__close:hover {
+  border-color: #58a6ff;
+}
+.xterm-artifact-modal__controls {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1001;
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+}
+.xterm-artifact-modal__controls button {
+  width: 36px;
+  height: 36px;
+  font-size: 18px;
+  line-height: 1;
+  color: #c9d1d9;
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.xterm-artifact-modal__controls button:hover {
   border-color: #58a6ff;
 }
 .term-composer {
