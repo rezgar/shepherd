@@ -108,6 +108,26 @@ describe('detectArtifacts — mermaid', () => {
   });
 });
 
+describe('detectArtifacts — inline SVG', () => {
+  it('detects an <svg>…</svg> block the model printed inline', () => {
+    const buf = lines(
+      [
+        'SVG cat',
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 220">',
+        '  <circle cx="110" cy="90" r="48" fill="#f7b267"/>',
+        '  <ellipse cx="92" cy="88" rx="8" ry="11"/>',
+        '</svg>',
+        'done',
+      ].join('\n'),
+    );
+    const svgs = detectArtifacts(buf).filter((b) => b.kind === 'svg');
+    expect(svgs).toHaveLength(1);
+    expect(svgs[0].start).toBe(1); // the <svg line, not the "SVG cat" header
+    expect(svgs[0].end).toBe(4); // the </svg> line
+    expect(svgs[0].source).toContain('<circle');
+  });
+});
+
 describe('detectArtifacts — image tool blocks', () => {
   it('covers a Write(<svg>) block and captures the path', () => {
     const buf = lines(
@@ -140,6 +160,24 @@ describe('detectArtifacts — image tool blocks', () => {
   it('does not treat a non-image Write as an image', () => {
     const buf = lines(['● Write(src/index.ts)', '  ⎿ Wrote 10 lines'].join('\n'));
     expect(detectArtifacts(buf).filter((b) => b.kind === 'image')).toHaveLength(0);
+  });
+
+  it('reconstructs an image path that Claude Code wrapped across lines', () => {
+    const buf = lines(
+      [
+        '● Write(~/very/long/path/that/keeps/going/until/it/breaks/mid-tok',
+        '        en/scratchpad/cat.svg)',
+        '  ⎿ Wrote 46 lines to cat.svg',
+        '     1 <svg viewBox="0 0 400 400">',
+        '',
+        '● Done.',
+      ].join('\n'),
+    );
+    const imgs = detectArtifacts(buf).filter((b) => b.kind === 'image');
+    expect(imgs).toHaveLength(1);
+    expect(imgs[0].path).toBe('~/very/long/path/that/keeps/going/until/it/breaks/mid-token/scratchpad/cat.svg');
+    expect(imgs[0].start).toBe(0);
+    expect(imgs[0].end).toBe(3); // through the preview, not the next bullet
   });
 
   it('does not fire on a tool name mentioned mid-sentence', () => {

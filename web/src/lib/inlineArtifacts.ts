@@ -15,7 +15,7 @@ import mermaid from 'mermaid';
  *  behaviours confirmed against a live Claude Code TUI. Requires the terminal to
  *  be created with `allowProposedApi: true` (registerDecoration is EXPERIMENTAL). */
 
-export type ArtifactKind = 'mermaid' | 'image';
+export type ArtifactKind = 'mermaid' | 'image' | 'svg';
 
 export interface ArtifactBlock {
   /** Absolute buffer line index of the block's first row (inclusive). */
@@ -23,7 +23,7 @@ export interface ArtifactBlock {
   /** Absolute buffer line index of the block's last row (inclusive). */
   end: number;
   kind: ArtifactKind;
-  /** The block's text — mermaid source for diagrams; unused for images. */
+  /** The block's text — mermaid source for `mermaid`, raw markup for `svg`. */
   source: string;
   /** Filesystem path of the image, for `kind === 'image'`. */
   path?: string;
@@ -54,12 +54,17 @@ const MERMAID_LINE =
 // an image file. The block ITSELF is the reserved space — Claude Code prints a
 // multi-row file/preview under it — so we cover that block with the rendered
 // image. No hook, no placeholder convention: the tool output is the anchor, the
-// same way mermaid source is. The path is captured from inside the parens.
-// Anchored to the start of the tool line (optionally after Claude Code's single
-// bullet glyph) so a tool name MENTIONED mid-sentence in prose can't false-match —
-// graceful degradation wouldn't catch that one, since a coincidentally-existing
-// file would render successfully over the paragraph.
-const IMG_TOOL = /^\s*(?:\S\s+)?(?:Write|Read|Edit|Update)\(\s*([^)]*?\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif))\s*\)/i;
+// same way mermaid source is.
+//
+// IMG_TOOL_OPEN matches only the START of the tool call (anchored to line start,
+// optionally after Claude Code's single bullet glyph, so a tool name mentioned
+// mid-sentence in prose can't false-match). The path is then reconstructed by
+// joining rows until the closing ")" — Claude Code wraps a long absolute path
+// across several indented continuation lines, so the extension and ")" often land
+// on a later row than the "Write(".
+const IMG_TOOL_OPEN = /^\s*(?:\S\s+)?(?:Write|Read|Edit|Update)\(/i;
+const IMG_TOOL_PATH = /(?:Write|Read|Edit|Update)\(\s*([^)]*?)\s*\)/i;
+const IMG_EXT = /\.(?:png|jpe?g|gif|webp|svg|bmp|ico|avif)$/i;
 
 /** Locate every diagram/image block in the buffer's plain text. Pure over the
  *  line array so it can be unit-tested without a live terminal. `lines[i]` is the
@@ -67,15 +72,25 @@ const IMG_TOOL = /^\s*(?:\S\s+)?(?:Write|Read|Edit|Update)\(\s*([^)]*?\.(?:png|j
 export function detectArtifacts(lines: string[]): ArtifactBlock[] {
   const out: ArtifactBlock[] = [];
 
-  // Image tool blocks: a Write/Read(<image file>) line, then its indented preview.
-  // The block runs from the tool line through the last indented output row (the
-  // "Wrote N lines" / file preview), ending at the next non-indented bullet/prose.
+  // Image tool blocks: a Write/Read(<image file>) call, then its indented preview.
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i].match(IMG_TOOL);
-    if (!m) continue;
+    if (!IMG_TOOL_OPEN.test(lines[i])) continue;
+    // Reconstruct the parenthesised path, joining wrapped continuation rows (their
+    // indent is stripped) until the closing ")".
+    let joined = lines[i];
+    let closeRow = i;
+    for (let j = i; j < lines.length && j <= i + 4; j++) {
+      if (j > i) joined += lines[j].trimStart();
+      closeRow = j;
+      if (joined.includes(')')) break;
+    }
+    const m = joined.match(IMG_TOOL_PATH);
+    if (!m || !IMG_EXT.test(m[1])) continue; // not a complete image path
     const path = m[1].trim();
-    let end = i;
-    for (let j = i + 1; j < lines.length && j < i + 60; j++) {
+    // Extend from the tool line through the last indented output row (the "Wrote N
+    // lines" / file preview), ending at the next non-indented bullet/prose.
+    let end = closeRow;
+    for (let j = closeRow + 1; j < lines.length && j < closeRow + 60; j++) {
       if (lines[j].trim() === '') continue; // blank line within the tool output
       if (/^\s+\S/.test(lines[j])) {
         end = j; // indented preview row
@@ -107,6 +122,22 @@ export function detectArtifacts(lines: string[]): ArtifactBlock[] {
       break; // prose → the block ended at the last source line
     }
     out.push({ start, end, kind: 'mermaid', source: lines.slice(i, end + 1).join('\n') });
+    i = end;
+  }
+
+  // Inline SVG blocks: the model printed <svg …> … </svg> straight into the text
+  // (rather than writing a file). The markup itself is the image — render it directly.
+  for (let i = 0; i < lines.length; i++) {
+    if (!/<svg[\s>]/i.test(lines[i])) continue;
+    let end = -1;
+    for (let j = i; j < lines.length && j < i + 400; j++) {
+      if (/<\/svg>/i.test(lines[j])) {
+        end = j;
+        break;
+      }
+    }
+    if (end < 0) continue; // no closing tag in range
+    out.push({ start: i, end, kind: 'svg', source: lines.slice(i, end + 1).join('\n') });
     i = end;
   }
 
@@ -152,61 +183,142 @@ function openArtifactModal(card: HTMLElement) {
   closeBtn.textContent = '✕';
   closeBtn.setAttribute('aria-label', 'Close');
 
-  content.classList.add('xterm-artifact-modal__content');
+  const controls = document.createElement('div');
+  controls.className = 'xterm-artifact-modal__controls';
+  const mkBtn = (label: string, title: string) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.title = title;
+    b.setAttribute('aria-label', title);
+    return b;
+  };
+  const btnOut = mkBtn('−', 'Zoom out');
+  const btnReset = mkBtn('⟳', 'Reset zoom & position');
+  const btnIn = mkBtn('+', 'Zoom in');
+  controls.append(btnOut, btnReset, btnIn);
+
   stage.appendChild(content); // move, don't clone
-  backdrop.append(stage, closeBtn);
+  backdrop.append(stage, closeBtn, controls);
   document.body.appendChild(backdrop);
 
   let scale = 1;
   let tx = 0;
   let ty = 0;
-  let dragging = false;
-  let lastX = 0;
-  let lastY = 0;
   const apply = () => {
     stage.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
   };
+  // Zoom by `ratio` while keeping the screen point (px, py) fixed. The stage's
+  // transform-origin is its centre, so its rect centre moves only by (tx, ty).
+  const zoomAt = (px: number, py: number, ratio: number) => {
+    const next = Math.min(20, Math.max(0.2, scale * ratio));
+    const r = next / scale;
+    if (r === 1) return;
+    const rect = stage.getBoundingClientRect();
+    tx += (px - (rect.left + rect.width / 2)) * (1 - r);
+    ty += (py - (rect.top + rect.height / 2)) * (1 - r);
+    scale = next;
+    apply();
+  };
+  btnIn.addEventListener('click', () => zoomAt(innerWidth / 2, innerHeight / 2, 1.25));
+  btnOut.addEventListener('click', () => zoomAt(innerWidth / 2, innerHeight / 2, 1 / 1.25));
+  btnReset.addEventListener('click', () => {
+    scale = 1;
+    tx = 0;
+    ty = 0;
+    apply();
+  });
+
+  // Mouse wheel + touchpad pinch that arrives as ctrl+wheel.
   const onWheel = (e: WheelEvent) => {
-    e.preventDefault();
-    scale = Math.min(20, Math.max(0.2, scale * (e.deltaY < 0 ? 1.12 : 1 / 1.12)));
-    apply();
+    e.preventDefault(); // also blocks the browser's own pinch/ctrl-wheel page zoom
+    zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * (e.ctrlKey ? 0.02 : 0.0015)));
   };
-  const onDown = (e: MouseEvent) => {
-    dragging = true;
-    lastX = e.clientX;
-    lastY = e.clientY;
-    e.preventDefault();
+
+  // Pointer gestures — one pointer pans, two pointers pinch-zoom. Covers
+  // touchscreens and touchpads that report the gesture as pointers (where a plain
+  // wheel handler catches nothing). `touch-action: none` on the backdrop lets these
+  // reach us instead of the browser zooming the page.
+  const pts = new Map<number, { x: number; y: number }>();
+  let panX = 0;
+  let panY = 0;
+  let pinchDist = 0;
+  let pinchMidX = 0;
+  let pinchMidY = 0;
+  const onPointerDown = (e: PointerEvent) => {
+    e.preventDefault(); // stop native drag / text-selection on the SVG swallowing the pan
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size === 1) {
+      panX = e.clientX;
+      panY = e.clientY;
+    } else if (pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      pinchDist = Math.hypot(a.x - b.x, a.y - b.y);
+      pinchMidX = (a.x + b.x) / 2;
+      pinchMidY = (a.y + b.y) / 2;
+    }
   };
-  const onMove = (e: MouseEvent) => {
-    if (!dragging) return;
-    tx += e.clientX - lastX;
-    ty += e.clientY - lastY;
-    lastX = e.clientX;
-    lastY = e.clientY;
-    apply();
+  const onPointerMove = (e: PointerEvent) => {
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size >= 2) {
+      const [a, b] = [...pts.values()];
+      const dist = Math.hypot(a.x - b.x, a.y - b.y);
+      const midX = (a.x + b.x) / 2;
+      const midY = (a.y + b.y) / 2;
+      if (pinchDist > 0) {
+        zoomAt(midX, midY, dist / pinchDist);
+        tx += midX - pinchMidX; // two-finger pan
+        ty += midY - pinchMidY;
+        apply();
+      }
+      pinchDist = dist;
+      pinchMidX = midX;
+      pinchMidY = midY;
+    } else {
+      tx += e.clientX - panX;
+      ty += e.clientY - panY;
+      panX = e.clientX;
+      panY = e.clientY;
+      apply();
+    }
   };
-  const onUp = () => {
-    dragging = false;
+  const onPointerUp = (e: PointerEvent) => {
+    pts.delete(e.pointerId);
+    if (pts.size < 2) pinchDist = 0;
+    if (pts.size === 1) {
+      const [p] = [...pts.values()];
+      panX = p.x;
+      panY = p.y;
+    }
   };
+
   const close = () => {
     backdrop.removeEventListener('wheel', onWheel);
-    window.removeEventListener('mousemove', onMove);
-    window.removeEventListener('mouseup', onUp);
-    window.removeEventListener('keydown', onKey);
-    content.classList.remove('xterm-artifact-modal__content');
+    stage.removeEventListener('pointerdown', onPointerDown);
+    window.removeEventListener('pointermove', onPointerMove);
+    window.removeEventListener('pointerup', onPointerUp);
+    window.removeEventListener('pointercancel', onPointerUp);
+    window.removeEventListener('keydown', onKey, true);
     card.appendChild(content); // restore into the terminal cover
     backdrop.remove();
     if (closeActiveModal === close) closeActiveModal = null;
   };
   const onKey = (e: KeyboardEvent) => {
-    if (e.key === 'Escape') close();
+    if (e.key !== 'Escape') return;
+    // Capture phase + stopPropagation so Esc closes the modal instead of reaching
+    // the terminal underneath (which would forward it to the PTY / interrupt Claude).
+    e.preventDefault();
+    e.stopPropagation();
+    close();
   };
 
   backdrop.addEventListener('wheel', onWheel, { passive: false });
-  stage.addEventListener('mousedown', onDown);
-  window.addEventListener('mousemove', onMove);
-  window.addEventListener('mouseup', onUp);
-  window.addEventListener('keydown', onKey);
+  backdrop.addEventListener('dragstart', (e) => e.preventDefault()); // belt-and-braces vs native SVG drag
+  stage.addEventListener('pointerdown', onPointerDown);
+  window.addEventListener('pointermove', onPointerMove);
+  window.addEventListener('pointerup', onPointerUp);
+  window.addEventListener('pointercancel', onPointerUp);
+  window.addEventListener('keydown', onKey, true); // capture, to beat the terminal to Esc
   closeBtn.addEventListener('click', close);
   backdrop.addEventListener('click', (e) => {
     if (e.target === backdrop) close();
@@ -237,7 +349,9 @@ export interface InlineArtifactDeps {
 /** Stable identity for a block — so a failed render isn't retried on every scan,
  *  and a reflowed block isn't mistaken for a new one. */
 function keyOf(b: ArtifactBlock): string {
-  return b.kind === 'image' ? `image:${b.path}` : `mermaid:${b.source}`;
+  if (b.kind === 'image') return `image:${b.path}`;
+  if (b.kind === 'svg') return `svg:${b.source}`;
+  return `mermaid:${b.source}`;
 }
 
 /** Attach an inline-artifact layer to a terminal. Scanning is caller-driven
@@ -301,6 +415,7 @@ export function createInlineArtifactLayer(term: Terminal, deps: InlineArtifactDe
         card.style.height = rows * c.h + 'px';
       }
       if (b.kind === 'image') renderImage(card, b, onFail);
+      else if (b.kind === 'svg') renderInlineSvg(card, b.source, onFail);
       else renderMermaid(card, b.source, onFail);
       // Click the artifact to open it zoomable/pannable full-screen.
       card.addEventListener('click', () => openArtifactModal(card));
@@ -320,7 +435,16 @@ export function createInlineArtifactLayer(term: Terminal, deps: InlineArtifactDe
       .then(({ svg }) => {
         card.innerHTML = svg;
       })
-      .catch(onFail); // unparseable (or over-captured / false positive) → reveal source
+      .catch((e) => {
+        // Unparseable (or over-captured / false positive) → reveal the source.
+        console.error('[inline-artifact] mermaid render failed:', e);
+        onFail();
+      });
+  }
+
+  function renderInlineSvg(card: HTMLElement, source: string, onFail: () => void) {
+    card.innerHTML = source; // the markup is the image
+    if (!card.querySelector('svg')) onFail(); // didn't parse as SVG → reveal the source
   }
 
   function renderImage(card: HTMLElement, b: ArtifactBlock, onFail: () => void) {
