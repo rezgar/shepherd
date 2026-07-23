@@ -1,5 +1,7 @@
 import http from 'node:http';
 import path from 'node:path';
+import os from 'node:os';
+import { readFileSync, existsSync } from 'node:fs';
 import { WebSocketServer, type WebSocket } from 'ws';
 import chokidar from 'chokidar';
 import { scanAll, PROJECTS_DIR } from './scan.js';
@@ -50,6 +52,50 @@ function subagentFilePath(parentFile: string, sessionId: string, agentId: string
 }
 
 const norm = (p: string) => p.replace(/\\/g, '/');
+
+const IMAGE_TYPES: Record<string, string> = {
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.bmp': 'image/bmp',
+  '.ico': 'image/x-icon',
+  '.avif': 'image/avif',
+};
+
+/** Serve a local image file the model wrote or read, so it can render inline in
+ *  the terminal. The path comes from a Write/Read tool block; `~` expands to home
+ *  and a relative path resolves against the session `cwd`. Only known image types
+ *  that actually exist are served — this reads arbitrary local paths, so it is
+ *  localhost-gated by the caller and refuses everything that isn't an image. */
+function serveLocalImage(req: http.IncomingMessage, res: http.ServerResponse) {
+  try {
+    const url = new URL(req.url ?? '', 'http://localhost');
+    let p = url.searchParams.get('p') ?? '';
+    const cwd = url.searchParams.get('cwd') ?? '';
+    if (!p) {
+      res.statusCode = 400;
+      res.end('missing path');
+      return;
+    }
+    if (p.startsWith('~')) p = path.join(os.homedir(), p.slice(1));
+    if (!path.isAbsolute(p) && cwd) p = path.join(cwd, p);
+    const type = IMAGE_TYPES[path.extname(p).toLowerCase()];
+    if (!type || !existsSync(p)) {
+      res.statusCode = 404;
+      res.end('not found');
+      return;
+    }
+    res.setHeader('content-type', type);
+    res.setHeader('cache-control', 'no-store');
+    res.end(readFileSync(p));
+  } catch {
+    res.statusCode = 500;
+    res.end('error');
+  }
+}
 
 async function buildSnapshot(): Promise<Snapshot> {
   const now = Date.now();
@@ -117,6 +163,18 @@ async function main() {
     if (req.method === 'GET' && req.url === '/version') {
       res.setHeader('content-type', 'application/json');
       res.end(JSON.stringify({ version: DAEMON_VERSION }));
+      return;
+    }
+    if (req.method === 'GET' && req.url?.startsWith('/localimage')) {
+      // Reads arbitrary local files → localhost only, same gate as /shutdown.
+      const remote = req.socket.remoteAddress ?? '';
+      const isLocal = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+      if (!isLocal) {
+        res.statusCode = 403;
+        res.end('forbidden');
+        return;
+      }
+      serveLocalImage(req, res);
       return;
     }
     if (req.method === 'POST' && req.url === '/shutdown') {

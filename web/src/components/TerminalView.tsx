@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import { createInlineArtifactLayer } from '../lib/inlineArtifacts';
 
 /** Renders a session's live raw PTY output. `resetKey` changing forces a
  *  fresh Terminal instance (used when switching sessions, since xterm.js
@@ -73,6 +74,7 @@ export function TerminalView({
   onResize,
   onInput,
   active,
+  resolveImageSrc,
 }: {
   resetKey: string;
   subscribeTerminal: (onChunk: (chunk: string) => void) => () => void;
@@ -88,6 +90,9 @@ export function TerminalView({
   /** When false (e.g. a modal is open over the view) the terminal blurs, so
    *  keystrokes don't leak into the pty behind it. */
   active: boolean;
+  /** Maps an image path (from a Write/Read tool block) to a loadable URL, so the
+   *  inline-artifact layer can render images inline. */
+  resolveImageSrc?: (path: string) => string | null;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -104,6 +109,8 @@ export function TerminalView({
   onInputRef.current = onInput;
   const activeRef = useRef(active);
   activeRef.current = active;
+  const resolveImageSrcRef = useRef(resolveImageSrc);
+  resolveImageSrcRef.current = resolveImageSrc;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -118,6 +125,8 @@ export function TerminalView({
       },
       scrollback: 5000,
       convertEol: true,
+      // registerDecoration (used by the inline-artifact layer) is EXPERIMENTAL.
+      allowProposedApi: true,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -125,6 +134,20 @@ export function TerminalView({
     fit.fit();
     termRef.current = term;
     fitRef.current = fit;
+
+    // Inline diagram/image rendering: once a burst of output settles, scan the
+    // buffer for mermaid blocks / image placeholders and cover each at its exact
+    // size. Debounced so a redrawing TUI (spinners, streaming) doesn't rescan on
+    // every frame; the layer dedupes by live marker so a settled block is covered
+    // once and survives later turns.
+    const artifacts = createInlineArtifactLayer(term, {
+      resolveImageSrc: (p) => resolveImageSrcRef.current?.(p) ?? null,
+    });
+    let scanTimer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleScan = () => {
+      clearTimeout(scanTimer);
+      scanTimer = setTimeout(() => artifacts.scan(), 200);
+    };
 
     // Let xterm process keys natively (it forwards them to the pty via onData
     // below), EXCEPT the cases the app owns — returning false hands the event
@@ -186,6 +209,7 @@ export function TerminalView({
     const unsubscribe = subscribeRef.current((chunk) => {
       term.write(chunk);
       onFirstChunk?.();
+      scheduleScan();
     });
 
     // Attach at exactly this terminal's fit size. The server sizes the PTY and
@@ -213,8 +237,10 @@ export function TerminalView({
 
     return () => {
       clearTimeout(settleTimer);
+      clearTimeout(scanTimer);
       unsubscribe();
       ro.disconnect();
+      artifacts.dispose();
       term.dispose();
       termRef.current = null;
       fitRef.current = null;

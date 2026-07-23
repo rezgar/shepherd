@@ -3,6 +3,15 @@ import type { ChatMsg, DirListing, Limits, Snapshot, SubagentInfo } from './type
 import { detectNewlySpawned, type SpawnedSession } from './lib/spawn';
 
 const WS_URL = import.meta.env.VITE_WS_URL ?? 'ws://localhost:4177';
+/** HTTP base for the daemon — same host/port as the WS control surface. */
+const HTTP_URL = WS_URL.replace(/^ws/, 'http');
+
+/** URL that serves a local image file the model wrote or read, so the terminal's
+ *  inline-artifact layer can render it. `cwd` lets the daemon resolve a path that
+ *  the tool block printed relative to the session's working directory. */
+export function localImageUrl(cwd: string, path: string): string {
+  return `${HTTP_URL}/localimage?cwd=${encodeURIComponent(cwd)}&p=${encodeURIComponent(path)}`;
+}
 
 interface Loaded {
   sessionId: string;

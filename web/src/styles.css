@@ -504,6 +504,86 @@ body {
   padding: 4px 8px;
   overflow: hidden;
 }
+
+/* Inline diagram/image cover: an xterm decoration overlaying the source block at
+ * its exact size. The card is opaque so the source text underneath is hidden, and
+ * spans the full block width so nothing leaks to the side. */
+.xterm-inline-artifact {
+  z-index: 20;
+  overflow: visible;
+  pointer-events: none;
+}
+.xterm-inline-artifact__card {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  /* Re-enable clicks on the card only (the wrapper stays pointer-events:none so
+   * the rest of the terminal is unaffected); click opens the zoom/pan modal. */
+  pointer-events: auto;
+  cursor: zoom-in;
+}
+.xterm-inline-artifact__card svg,
+.xterm-inline-artifact__img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+/* Full-screen zoom/pan overlay for a clicked diagram or image. */
+.xterm-artifact-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: rgba(1, 4, 9, 0.86);
+}
+.xterm-artifact-modal__stage {
+  transform-origin: center center;
+  will-change: transform;
+  cursor: grab;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.xterm-artifact-modal__stage:active {
+  cursor: grabbing;
+}
+.xterm-artifact-modal__content {
+  max-width: 90vw !important;
+  max-height: 90vh !important;
+  width: auto !important;
+  height: auto !important;
+  background: #0d1117;
+}
+.xterm-artifact-modal__close {
+  position: fixed;
+  top: 16px;
+  right: 20px;
+  z-index: 1001;
+  width: 34px;
+  height: 34px;
+  font-size: 15px;
+  color: #c9d1d9;
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.xterm-artifact-modal__close:hover {
+  border-color: #58a6ff;
+}
 .term-composer {
   border-top: 1px solid #21262d;
   padding: 8px 12px;

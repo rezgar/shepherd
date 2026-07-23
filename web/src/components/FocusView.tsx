@@ -3,6 +3,7 @@ import type { AgentModel, ChatMsg, Limits, SubagentInfo } from '../types';
 import { CardStrip } from './CardStrip';
 import type { StripState } from '../lib/order';
 import { TerminalView } from './TerminalView';
+import { localImageUrl } from '../api';
 import { SubagentModal } from './SubagentModal';
 import { LimitsTracker } from './LimitsTracker';
 
@@ -176,6 +177,7 @@ export function FocusView({
           onResize={(cols, rows) => onResizeTerm(focused.sessionId, cols, rows)}
           onInput={(data) => onSendTerminalKey(focused.sessionId, focused.cwd, data)}
           active={!subagentModal}
+          resolveImageSrc={(p) => localImageUrl(focused.cwd, p)}
         />
       </div>
 
