@@ -12,9 +12,13 @@ const pexec = promisify(execFile);
 
 export const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 
-/** Server keeps a generous window; the UI narrows it live. Tunable via env. */
-const WINDOW_HOURS = Number(process.env.SHEPHERD_WINDOW_HOURS ?? 24);
-export const RECENT_WINDOW_MS = (Number.isFinite(WINDOW_HOURS) ? WINDOW_HOURS : 24) * 3_600_000;
+/** Server keeps a generous window; the UI narrows it live. Must cover the
+ *  longest window the UI dropdown offers (currently 30 days) or sessions
+ *  older than this get dropped before the UI ever has a chance to show
+ *  them. Tunable via env. */
+const DEFAULT_WINDOW_HOURS = 24 * 30;
+const WINDOW_HOURS = Number(process.env.SHEPHERD_WINDOW_HOURS ?? DEFAULT_WINDOW_HOURS);
+export const RECENT_WINDOW_MS = (Number.isFinite(WINDOW_HOURS) ? WINDOW_HOURS : DEFAULT_WINDOW_HOURS) * 3_600_000;
 
 /** Dedicated, never-a-real-project cwd the periodic /usage probe (usage.ts)
  *  spawns its throwaway sessions in — there's no --json/--print equivalent

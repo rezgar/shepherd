@@ -4,6 +4,7 @@ import { CardStrip } from './CardStrip';
 import type { StripState } from '../lib/order';
 import { TerminalView } from './TerminalView';
 import { localImageUrl } from '../api';
+import { NewProjectButton } from './NewProjectButton';
 import { SubagentModal } from './SubagentModal';
 import { LimitsTracker } from './LimitsTracker';
 
@@ -24,6 +25,7 @@ export function FocusView({
   stripState,
   onReorderProduct,
   onReorderSession,
+  onNewProject,
   activeSubagents,
   onSelectSubagent,
   onCloseSubagent,
@@ -53,6 +55,7 @@ export function FocusView({
   stripState: StripState;
   onReorderProduct: (dragged: string, target: string) => void;
   onReorderSession: (product: string, dragged: string, target: string) => void;
+  onNewProject: () => void;
   activeSubagents: SubagentInfo[];
   onSelectSubagent: (s: SubagentInfo) => void;
   onCloseSubagent: () => void;
@@ -159,6 +162,7 @@ export function FocusView({
             )}
           </span>
           <span className="focus__tools">
+            <NewProjectButton onClick={onNewProject} />
             <LimitsTracker limits={limits} />
             <span className="fontctl" title="Terminal font size">
               <button onClick={() => onFontSize(-1)}>A−</button>
