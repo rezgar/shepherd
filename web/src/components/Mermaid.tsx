@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import mermaid from 'mermaid';
 
-mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+// suppressErrorRendering: without it, render() still rejects on a syntax error
+// (the .catch() below still runs), but mermaid ALSO builds its own "bomb" error
+// diagram and inserts it directly into document.body as a side effect before
+// throwing — an orphaned, unsized overlay that's never cleaned up.
+mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose', suppressErrorRendering: true });
 let seq = 0;
 
 /** Render a mermaid code block to SVG; fall back to the raw source on error. */
