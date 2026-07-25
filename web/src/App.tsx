@@ -5,12 +5,16 @@ import { FocusView } from './components/FocusView';
 import { LimitsTracker } from './components/LimitsTracker';
 import { ConnectionBanner } from './components/ConnectionBanner';
 import { NewProjectModal } from './components/NewProjectModal';
+import { NewProjectButton } from './components/NewProjectButton';
 import { groupByProduct } from './lib/format';
 import { stripAgents, stripOrder, groupStrip, reorder, neighborAfterClose, type StripState } from './lib/order';
 import { playDone, playError, playNeedsYou, unlockAudio } from './lib/sound';
 import type { AgentModel, AgentState } from './types';
 
 const PALETTE = ['#58a6ff', '#bc8cff', '#39c5cf', '#e3b341', '#f0883e', '#56d364', '#ff7b72', '#79c0ff'];
+// The largest value here must not exceed the server's own retention window
+// (SHEPHERD_WINDOW_HOURS / DEFAULT_WINDOW_HOURS in server/src/scan.ts) — the
+// server drops anything older before the UI ever gets a chance to show it.
 const WINDOWS = [1, 4, 12, 24, 24 * 7, 24 * 30];
 const windowLabel = (h: number) => (h <= 24 ? `${h}h` : `${h / 24}d`);
 
@@ -366,9 +370,7 @@ export function App() {
             ))}
           </select>
         </label>
-        <button className="new-project-btn" onClick={() => setNewProjectOpen(true)} title="Start a session in a new project directory">
-          + new project
-        </button>
+        <NewProjectButton onClick={() => setNewProjectOpen(true)} />
         <button className="mute-toggle" onClick={() => setMuted((m) => !m)} title={muted ? 'Unmute sounds' : 'Mute sounds'}>
           {muted ? '🔕' : '🔔'}
         </button>

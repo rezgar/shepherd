@@ -4,6 +4,7 @@ import { CardStrip } from './CardStrip';
 import type { StripState } from '../lib/order';
 import { TerminalView } from './TerminalView';
 import { localImageUrl } from '../api';
+import { NewProjectButton } from './NewProjectButton';
 import { SubagentModal } from './SubagentModal';
 import { LimitsTracker } from './LimitsTracker';
 
@@ -161,9 +162,7 @@ export function FocusView({
             )}
           </span>
           <span className="focus__tools">
-            <button className="new-project-btn" onClick={onNewProject} title="Start a session in a new project directory">
-              + new project
-            </button>
+            <NewProjectButton onClick={onNewProject} />
             <LimitsTracker limits={limits} />
             <span className="fontctl" title="Terminal font size">
               <button onClick={() => onFontSize(-1)}>A−</button>
