@@ -155,7 +155,11 @@ export function readBufferLines(term: Terminal): string[] {
 let mermaidReady = false;
 function initMermaid() {
   if (mermaidReady) return;
-  mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+  // suppressErrorRendering: without it, render() still rejects on a syntax error
+  // (onFail() does run), but mermaid ALSO builds its own "bomb" error diagram and
+  // inserts it directly into document.body as a side effect before throwing — an
+  // orphaned, unsized overlay outside our card's control that's never cleaned up.
+  mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose', suppressErrorRendering: true });
   mermaidReady = true;
 }
 let seq = 0;
