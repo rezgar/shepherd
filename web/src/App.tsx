@@ -11,7 +11,8 @@ import { playDone, playError, playNeedsYou, unlockAudio } from './lib/sound';
 import type { AgentModel, AgentState } from './types';
 
 const PALETTE = ['#58a6ff', '#bc8cff', '#39c5cf', '#e3b341', '#f0883e', '#56d364', '#ff7b72', '#79c0ff'];
-const WINDOWS = [1, 4, 12, 24];
+const WINDOWS = [1, 4, 12, 24, 24 * 7, 24 * 30];
+const windowLabel = (h: number) => (h <= 24 ? `${h}h` : `${h / 24}d`);
 
 function load<T>(key: string, fallback: T): T {
   try {
@@ -273,6 +274,24 @@ export function App() {
 
   const focused = focusedId ? (snap.agents.find((a) => a.sessionId === focusedId) ?? null) : null;
 
+  // Shared across both the canvas and focus views — starting a session in a
+  // new project directory shouldn't require backing out to the canvas first.
+  const newProjectModal = newProjectOpen && (
+    <NewProjectModal
+      dirListing={dirListing}
+      dirListingError={dirListingError}
+      onListDir={listDir}
+      onSpawn={spawn}
+      onClose={() => setNewProjectOpen(false)}
+      agents={snap.agents}
+      spawnErrors={spawnErrors}
+      onFocus={(file, sessionId) => {
+        setNewProjectOpen(false);
+        openSession(file, sessionId);
+      }}
+    />
+  );
+
   if (focused) {
     return (
       <div className="focus-shell">
@@ -294,6 +313,7 @@ export function App() {
           stripState={stripState}
           onReorderProduct={reorderProduct}
           onReorderSession={reorderSession}
+          onNewProject={() => setNewProjectOpen(true)}
           activeSubagents={activeSubagents}
           onSelectSubagent={(s) => openSubagent(focused.file, focused.sessionId, s.agentId, s.description)}
           onCloseSubagent={closeSubagent}
@@ -307,6 +327,7 @@ export function App() {
           onSendTerminalKey={sendTerminalKey}
           limits={limits}
         />
+        {newProjectModal}
       </div>
     );
   }
@@ -340,7 +361,7 @@ export function App() {
           <select value={windowH} onChange={(e) => setWindowH(Number(e.target.value))}>
             {WINDOWS.map((h) => (
               <option key={h} value={h}>
-                {h}h
+                {windowLabel(h)}
               </option>
             ))}
           </select>
@@ -394,21 +415,7 @@ export function App() {
         )}
       </main>
 
-      {newProjectOpen && (
-        <NewProjectModal
-          dirListing={dirListing}
-          dirListingError={dirListingError}
-          onListDir={listDir}
-          onSpawn={spawn}
-          onClose={() => setNewProjectOpen(false)}
-          agents={snap.agents}
-          spawnErrors={spawnErrors}
-          onFocus={(file, sessionId) => {
-            setNewProjectOpen(false);
-            openSession(file, sessionId);
-          }}
-        />
-      )}
+      {newProjectModal}
     </div>
   );
 }

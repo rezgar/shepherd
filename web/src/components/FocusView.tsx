@@ -24,6 +24,7 @@ export function FocusView({
   stripState,
   onReorderProduct,
   onReorderSession,
+  onNewProject,
   activeSubagents,
   onSelectSubagent,
   onCloseSubagent,
@@ -53,6 +54,7 @@ export function FocusView({
   stripState: StripState;
   onReorderProduct: (dragged: string, target: string) => void;
   onReorderSession: (product: string, dragged: string, target: string) => void;
+  onNewProject: () => void;
   activeSubagents: SubagentInfo[];
   onSelectSubagent: (s: SubagentInfo) => void;
   onCloseSubagent: () => void;
@@ -159,6 +161,9 @@ export function FocusView({
             )}
           </span>
           <span className="focus__tools">
+            <button className="new-project-btn" onClick={onNewProject} title="Start a session in a new project directory">
+              + new project
+            </button>
             <LimitsTracker limits={limits} />
             <span className="fontctl" title="Terminal font size">
               <button onClick={() => onFontSize(-1)}>A−</button>
