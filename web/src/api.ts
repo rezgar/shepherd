@@ -59,6 +59,14 @@ export interface Shepherd {
    *  was thrown away). Returns an unsubscribe function. */
   subscribeTerminal: (onChunk: (chunk: string) => void) => () => void;
   termError: string | null;
+  /** Working-tree lines-changed count for the focused session — null when
+   *  there's nothing to show (clean tree, or not a git repo). */
+  linesChanged: { added: number; removed: number } | null;
+  /** Port of the pre-warmed askdiff instance for the focused session, once
+   *  ready — null while still starting (or nothing focused). */
+  askdiffPort: number | null;
+  /** Set if the askdiff instance failed to start for the focused session. */
+  askdiffError: string | null;
   /** Ask the daemon to spawn a fresh session. `cwd` is required for a brand
    *  new product with no existing card to derive a repo root from — omit it
    *  to reuse an already-known product's repo root. */
@@ -137,6 +145,9 @@ export function useShepherd(): Shepherd {
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [termResetKey, setTermResetKey] = useState('');
   const [termError, setTermError] = useState<string | null>(null);
+  const [linesChanged, setLinesChanged] = useState<{ added: number; removed: number } | null>(null);
+  const [askdiffPort, setAskdiffPort] = useState<number | null>(null);
+  const [askdiffError, setAskdiffError] = useState<string | null>(null);
   const [activeSubagents, setActiveSubagents] = useState<SubagentInfo[]>([]);
   // product -> request timestamp, cleared once a fresher session shows up in
   // that group's snapshot, on a spawn-error, or after a safety timeout.
@@ -262,6 +273,17 @@ export function useShepherd(): Shepherd {
         } else if (d.type === 'termError') {
           if (d.sessionId !== focusRef.current?.sessionId) return;
           setTermError(d.error);
+        } else if (d.type === 'linesChanged') {
+          if (d.sessionId !== focusRef.current?.sessionId) return;
+          setLinesChanged(typeof d.added === 'number' ? { added: d.added, removed: d.removed } : null);
+        } else if (d.type === 'askdiffReady') {
+          if (d.sessionId !== focusRef.current?.sessionId) return;
+          setAskdiffError(null);
+          setAskdiffPort(d.port);
+        } else if (d.type === 'askdiffError') {
+          if (d.sessionId !== focusRef.current?.sessionId) return;
+          setAskdiffPort(null);
+          setAskdiffError(d.message);
         }
       };
       ws.onclose = () => {
@@ -288,6 +310,9 @@ export function useShepherd(): Shepherd {
     setLoaded(cache.current.get(sessionId) ?? null); // instant paint from cache, else clears
     setActiveSubagents([]);
     setSubagentModal(null);
+    setLinesChanged(null);
+    setAskdiffPort(null);
+    setAskdiffError(null);
     wsSend(wsRef.current, { type: 'focus', file, sessionId });
     wsSend(wsRef.current, { type: 'unfocusSubagent' });
   }, []);
@@ -298,6 +323,9 @@ export function useShepherd(): Shepherd {
     setLoaded(null);
     setActiveSubagents([]);
     setSubagentModal(null);
+    setLinesChanged(null);
+    setAskdiffPort(null);
+    setAskdiffError(null);
     wsSend(wsRef.current, { type: 'unfocus' });
     wsSend(wsRef.current, { type: 'unfocusSubagent' });
   }, []);
@@ -408,6 +436,9 @@ export function useShepherd(): Shepherd {
     loadMore,
     termResetKey,
     termError,
+    linesChanged,
+    askdiffPort,
+    askdiffError,
     attachTerminal,
     detachTerminal,
     sendTermInput,
