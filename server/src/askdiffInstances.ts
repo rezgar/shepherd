@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { startServer as startAskdiffServer, type ServerHandle } from '../vendor/askdiff/server/index.js';
 import { captureWorkingTreeDiff } from '../vendor/askdiff/server/util/working-tree-diff.js';
 import { createAskdiffUiHttpServer } from '../vendor/askdiff/static-server.js';
+import { resolveDiffBase } from './diffStat.js';
 
 // Mirrors sender.ts's PTY idle window/sweep cadence — same "how long is
 // this worth keeping warm after the user stops looking at it" call.
@@ -134,10 +135,21 @@ async function spawnInstance(cwd: string, claudeSessionId: string): Promise<Askd
   const diffDir = await mkdtemp(join(tmpdir(), 'shepherd-askdiff-'));
   try {
     const diffFile = join(diffDir, 'diff');
+    // Resolved once per spawn (mirrors the rest of this instance's
+    // lifecycle: pre-warmed at focus time, held fixed until the instance is
+    // evicted/respawned) rather than on every live refresh — the same base
+    // `diffStat.ts` uses for the top-bar count, so this panel normally
+    // agrees with it instead of showing its own separately-computed
+    // HEAD-only diff. Since a *focused* instance is exempt from idle
+    // eviction (see the sweep below), this can go stale relative to the
+    // pill for as long as a single focus session runs, if `main` moves in
+    // the meantime — accepted, since re-resolving on every filesystem-event
+    // refresh would mean extra git calls on every keystroke-adjacent save.
+    const base = await resolveDiffBase(cwd);
     // startServer's initial `sendDiff` reads this file immediately on
     // connect, before the working-tree watcher has ever fired — it must
     // already hold valid content, not just an empty placeholder.
-    const initialDiff = await captureWorkingTreeDiff(cwd);
+    const initialDiff = await captureWorkingTreeDiff(cwd, base?.sha);
     await writeFile(diffFile, initialDiff, 'utf8');
 
     const httpServer = createAskdiffUiHttpServer();
@@ -152,8 +164,9 @@ async function spawnInstance(cwd: string, claudeSessionId: string): Promise<Askd
         cwd,
         sessionId: claudeSessionId,
         diffFile,
-        diffLabel: 'Working tree',
+        diffLabel: base ? `Working tree vs ${base.branchName}` : 'Working tree',
         volatile: true,
+        ...(base ? { baseRef: base.sha } : {}),
         httpServer,
         // CRITICAL: askdiff's own idle-shutdown calls `process.exit()` when
         // no WS client has been connected for `idleShutdownMs` — harmless

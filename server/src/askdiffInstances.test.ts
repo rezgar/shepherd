@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { WebSocket } from 'ws';
 import {
   getOrSpawnAskdiffInstance,
   markAskdiffFocused,
@@ -64,6 +65,41 @@ describe('askdiffInstances', () => {
     const a = await getOrSpawnAskdiffInstance(randomUUID(), dir, randomUUID());
     const b = await getOrSpawnAskdiffInstance(randomUUID(), dir, randomUUID());
     expect(a.ok && b.ok && a.port !== b.port).toBe(true);
+  });
+
+  it("panel diff compares against the merge-base with main, matching the top-bar pill (#96)", async () => {
+    git(dir, 'checkout', '-q', '-b', 'feature');
+    writeFileSync(join(dir, 'tracked.ts'), 'export const x = 1;\nexport const y = 2;\n');
+    git(dir, 'add', 'tracked.ts');
+    git(dir, 'commit', '-q', '-m', 'committed on branch');
+    writeFileSync(
+      join(dir, 'tracked.ts'),
+      'export const x = 1;\nexport const y = 2;\nexport const z = 3;\n',
+    );
+
+    const sessionId = randomUUID();
+    const result = await getOrSpawnAskdiffInstance(sessionId, dir, sessionId);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const diff = await new Promise<{ raw: string; label?: string }>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${String(result.port)}/ws`);
+      ws.on('message', (data) => {
+        const msg: unknown = JSON.parse(data.toString());
+        if (typeof msg === 'object' && msg !== null && (msg as { type?: string }).type === 'diff') {
+          ws.close();
+          resolve(msg as { raw: string; label?: string });
+        }
+      });
+      ws.on('error', reject);
+    });
+
+    // A `HEAD`-only diff would show just the uncommitted `z` addition — the
+    // committed `y` line only appears if the panel diffs against the
+    // merge-base with `main`, not `HEAD`.
+    expect(diff.raw).toContain('+export const y = 2;');
+    expect(diff.raw).toContain('+export const z = 3;');
+    expect(diff.label).toBe('Working tree vs main');
   });
 
   it('fails without leaking a temp diff directory when cwd does not exist', async () => {

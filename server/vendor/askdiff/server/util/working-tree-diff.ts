@@ -16,8 +16,15 @@ const MAX_BUFFER = 64 * 1024 * 1024;
 // Called on every filesystem event for a volatile session so the server
 // can push a live update instead of waiting for the user to re-run
 // `/askdiff`.
-export async function captureWorkingTreeDiff(cwd: string): Promise<string> {
-  const tracked = await diffAgainstHead(cwd);
+//
+// `baseRef` overrides the tracked-diff base (default `HEAD`) — Shepherd's
+// embedding passes its own merge-base-with-main/master here so this panel
+// agrees with its top-bar lines-changed count instead of always comparing
+// to the last commit. Every other caller (the standalone askdiff CLI/skill)
+// leaves it unset, so their documented "working tree vs last commit"
+// behavior is unchanged.
+export async function captureWorkingTreeDiff(cwd: string, baseRef?: string): Promise<string> {
+  const tracked = await diffAgainstBase(cwd, baseRef);
 
   const { stdout: rawUntracked } = await execFileAsync(
     "git",
@@ -33,15 +40,15 @@ export async function captureWorkingTreeDiff(cwd: string): Promise<string> {
   return tracked + untrackedDiffs.join("");
 }
 
-async function diffAgainstHead(cwd: string): Promise<string> {
+async function diffAgainstBase(cwd: string, baseRef?: string): Promise<string> {
   try {
-    const { stdout } = await execFileAsync("git", ["diff", "HEAD", "--no-color"], {
+    const { stdout } = await execFileAsync("git", ["diff", baseRef ?? "HEAD", "--no-color"], {
       cwd,
       maxBuffer: MAX_BUFFER,
     });
     return stdout;
   } catch {
-    // `HEAD` doesn't resolve — no commits yet. Fall back to the empty
+    // The base doesn't resolve — no commits yet. Fall back to the empty
     // tree rather than surfacing the ref-resolution error.
     const { stdout } = await execFileAsync(
       "git",
