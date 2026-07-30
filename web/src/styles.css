@@ -745,6 +745,71 @@ body {
 .fontctl button:hover {
   border-color: #4b5563;
 }
+.lines-changed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #161b22;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.lines-changed:hover {
+  border-color: #4b5563;
+}
+.lines-changed__added {
+  color: #3fb950;
+}
+.lines-changed__removed {
+  color: #f85149;
+}
+.askdiff-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: #0b0f14;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  color: #6e7681;
+}
+.askdiff-bar button {
+  background: #161b22;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.askdiff-bar button:hover {
+  border-color: #4b5563;
+}
+.askdiff-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+.askdiff-view__frame {
+  flex: 1;
+  border: none;
+  background: #fff;
+}
+.askdiff-view--status {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #6e7681;
+  font-size: 13px;
+}
+.askdiff-view--status.askdiff-view--error {
+  color: #f85149;
+}
 .focus__edit {
   background: none;
   border: none;

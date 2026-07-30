@@ -10,6 +10,15 @@ import { attachTerminal, detachTerminal, writeTermInput, resizeTerm, sendTermina
 import { computeLimits, type Limits } from './usage.js';
 import { listDir } from './browse.js';
 import type { Snapshot } from './types.js';
+import { computeDiffStat } from './diffStat.js';
+import {
+  getOrSpawnAskdiffInstance,
+  markAskdiffFocused,
+  markAskdiffUnfocused,
+  unmarkAskdiffAllForConnection,
+  startAskdiffIdleEvictionSweep,
+  shutdownAllAskdiffInstances,
+} from './askdiffInstances.js';
 
 // This process serves every connected session, not just one — an uncaught
 // exception anywhere (a bad pty.spawn under load, a malformed transcript
@@ -147,7 +156,9 @@ async function main() {
   const shutdown = () => {
     if (shuttingDown) return; // /shutdown + a signal could both fire
     shuttingDown = true;
-    void shutdownAllSessions().finally(() => process.exit(0));
+    void Promise.all([shutdownAllSessions(), shutdownAllAskdiffInstances()]).finally(() =>
+      process.exit(0),
+    );
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
@@ -220,6 +231,7 @@ async function main() {
   const inFlight = new Map<string, { cancel: () => void }>();
 
   startIdleEvictionSweep();
+  startAskdiffIdleEvictionSweep();
 
   const broadcast = () => {
     const data = JSON.stringify(current);
@@ -288,6 +300,36 @@ async function main() {
     }
   };
 
+  // Lines-changed indicator (top bar) — computed independently of the
+  // askdiff instance itself; must never wait on that (heavier) process.
+  // `lastLinesChanged` dedupes the *periodic sweep's* re-broadcast so an
+  // unchanged working tree doesn't re-push an identical message to
+  // connections that are already showing the current value every 3s tick.
+  // It must NOT gate the initial on-focus send below (`force: true`) — a
+  // newly-focusing connection has never seen any value for this session,
+  // regardless of whether some OTHER connection happened to already
+  // receive this exact payload; keying the cache by sessionId alone and
+  // checking it unconditionally silently dropped that first send entirely
+  // (caught live: a fresh connection/page-load focusing a session whose
+  // diff hadn't changed since an earlier connection saw it got nothing).
+  const lastLinesChanged = new Map<string, string>();
+  const sendLinesChanged = async (
+    sessionId: string,
+    cwd: string,
+    targets: Iterable<FocusWs>,
+    force = false,
+  ) => {
+    const stat = await computeDiffStat(cwd);
+    const payload = JSON.stringify(
+      stat
+        ? { type: 'linesChanged', sessionId, added: stat.added, removed: stat.removed }
+        : { type: 'linesChanged', sessionId, added: null, removed: null },
+    );
+    if (!force && lastLinesChanged.get(sessionId) === payload) return;
+    lastLinesChanged.set(sessionId, payload);
+    for (const c of targets) if (c.readyState === 1) c.send(payload);
+  };
+
   // Subagents get a simple, unpaginated live view — their conversations are
   // short-lived, no need for the main transcript's infinite-scroll machinery.
   const sendSubagentWindow = async (ws: FocusWs) => {
@@ -305,6 +347,7 @@ async function main() {
     ws.on('close', () => {
       if (ws.termSession) detachTerminal(ws.termSession, ws);
       unpinAllForConnection(ws);
+      unmarkAskdiffAllForConnection(ws);
     });
     ws.send(JSON.stringify(current));
     if (currentLimits) ws.send(JSON.stringify({ type: 'limits', ...currentLimits }));
@@ -316,12 +359,36 @@ async function main() {
         return;
       }
       if (m.type === 'focus' && m.file && m.sessionId) {
+        // The client re-uses 'focus' to switch sessions without an
+        // intervening 'unfocus' — release the previous session's askdiff
+        // focus-mark here, or it stays "focused" (protected from idle
+        // eviction) forever once this connection moves on.
+        if (ws.focusSession && ws.focusSession !== m.sessionId) {
+          markAskdiffUnfocused(ws.focusSession, ws);
+        }
         ws.focusFile = m.file;
         ws.focusSession = m.sessionId;
         void sendWindow(ws);
+
+        const agent = current.agents.find((a) => a.sessionId === m.sessionId);
+        if (agent) {
+          markAskdiffFocused(m.sessionId, ws);
+          void sendLinesChanged(m.sessionId, agent.cwd, [ws], true);
+          void getOrSpawnAskdiffInstance(m.sessionId, agent.cwd, m.sessionId).then((result) => {
+            if (ws.readyState !== 1) return;
+            ws.send(
+              JSON.stringify(
+                result.ok
+                  ? { type: 'askdiffReady', sessionId: m.sessionId, port: result.port }
+                  : { type: 'askdiffError', sessionId: m.sessionId, message: result.message },
+              ),
+            );
+          });
+        }
       } else if (m.type === 'loadMore' && typeof m.before === 'number') {
         void sendWindow(ws, m.before);
       } else if (m.type === 'unfocus') {
+        if (ws.focusSession) markAskdiffUnfocused(ws.focusSession, ws);
         ws.focusFile = undefined;
         ws.focusSession = undefined;
       } else if (m.type === 'focusSubagent' && m.parentFile && m.sessionId && m.agentId) {
@@ -469,6 +536,26 @@ async function main() {
     current = await buildSnapshot();
     broadcast();
   }, 15_000);
+
+  // Keeps the top-bar lines-changed count live while a session stays
+  // focused, independent of both the transcript watcher above (a
+  // different filesystem tree — ~/.claude/projects, not the session's own
+  // working tree) and the askdiff instance's own internal watcher (whose
+  // readiness this must never depend on). Grouped by distinct session so
+  // two connections focused on the same session share one git call.
+  setInterval(() => {
+    const bySession = new Map<string, FocusWs[]>();
+    for (const c of wss.clients as Set<FocusWs>) {
+      if (!c.focusSession) continue;
+      const list = bySession.get(c.focusSession);
+      if (list) list.push(c);
+      else bySession.set(c.focusSession, [c]);
+    }
+    for (const [sessionId, targets] of bySession) {
+      const agent = current.agents.find((a) => a.sessionId === sessionId);
+      if (agent) void sendLinesChanged(sessionId, agent.cwd, targets);
+    }
+  }, 3_000);
 }
 
 main().catch((e) => {
