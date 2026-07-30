@@ -54,11 +54,12 @@ const inFlight = new Map<string, Promise<DiffStat | null>>();
  *  (uncommitted changes only) when neither `main` nor `master` resolves
  *  locally.
  *
- *  Note this means the count no longer always matches the embedded askdiff
- *  panel opened by clicking the pill — that vendored instance always shows
- *  a working-tree-vs-`HEAD` diff (see working-tree-diff.ts) with no
- *  base-ref option. Accepted tradeoff (#94): the pill's job is to reflect
- *  "how much has this branch changed", not to mirror the panel exactly.
+ *  `resolveDiffBase` below is also reused by `askdiffInstances.ts` (#96) so
+ *  the embedded askdiff panel opened by clicking the pill diffs against
+ *  this exact same base — unlike this function, the panel's instance
+ *  resolves it once at spawn time rather than on every recompute (see that
+ *  file's own comment), so the two can drift apart if `main` moves during
+ *  a single long-focused session.
  *
  *  Deliberately uncached, unlike `repoSlug`/`issueTitle` in scan.ts: those
  *  cache static facts that don't change once known; this reflects live
@@ -91,7 +92,7 @@ async function computeDiffStatUncached(cwd: string): Promise<DiffStat | null> {
   // a ref-resolution error.
   const base = await resolveDiffBase(cwd);
   const tracked =
-    (base !== null ? await numstat(cwd, ['diff', base, '--numstat']) : null) ??
+    (base !== null ? await numstat(cwd, ['diff', base.sha, '--numstat']) : null) ??
     (await numstat(cwd, ['diff', 'HEAD', '--numstat'])) ??
     (await numstat(cwd, ['diff', EMPTY_TREE_SHA, '--numstat'])) ?? { added: 0, removed: 0 };
 
@@ -113,13 +114,23 @@ async function computeDiffStatUncached(cwd: string): Promise<DiffStat | null> {
   return { added, removed };
 }
 
+export interface DiffBase {
+  sha: string;
+  branchName: string;
+}
+
 /** Resolves the diff base as the merge-base of `HEAD` and whichever of
  *  `main`/`master` exists as a *local* branch (worktrees share refs with
  *  the main checkout, so this resolves correctly even when the branch
  *  itself is checked out elsewhere). Returns `null` — letting the caller
  *  fall back to `HEAD` — when neither branch exists locally, or `HEAD`
- *  doesn't resolve yet. */
-async function resolveDiffBase(cwd: string): Promise<string | null> {
+ *  doesn't resolve yet.
+ *
+ *  Exported for `askdiffInstances.ts`, which needs the same base (and the
+ *  resolved branch name, for the diff panel's label) so the embedded
+ *  askdiff panel agrees with this top-bar count instead of showing its own
+ *  separately-computed working-tree-vs-HEAD diff. */
+export async function resolveDiffBase(cwd: string): Promise<DiffBase | null> {
   for (const candidate of MAIN_BRANCH_CANDIDATES) {
     const exists = await pexec('git', ['rev-parse', '--verify', '--quiet', candidate], {
       cwd,
@@ -135,7 +146,7 @@ async function resolveDiffBase(cwd: string): Promise<string | null> {
     })
       .then(({ stdout }) => stdout.trim())
       .catch(() => null);
-    if (mergeBase) return mergeBase;
+    if (mergeBase) return { sha: mergeBase, branchName: candidate };
   }
   return null;
 }

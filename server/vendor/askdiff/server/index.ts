@@ -28,6 +28,10 @@ export interface ServerState {
   // contents can drift as the user edits files). Triggers the
   // staleness check on every diff push.
   volatile: boolean;
+  // Overrides the working-tree diff's base (default `HEAD`) on every
+  // recompute. Ignored when `volatile` is false — history-based diffs are
+  // whatever `diffFile` already contains.
+  baseRef?: string;
 }
 
 export interface StartServerOptions {
@@ -49,6 +53,9 @@ export interface StartServerOptions {
   // mtime-based staleness should stay perpetually resolved outside of a
   // brief in-flight window.
   volatile?: boolean;
+  // Overrides the working-tree diff's base (default `HEAD`) — see
+  // `ServerState.baseRef`. Only meaningful alongside `volatile: true`.
+  baseRef?: string;
   // Standalone mode: pass `port` (and optionally `host`) and the server
   // creates its own HTTP listener.
   port?: number;
@@ -95,7 +102,7 @@ async function sendDiff(ws: WebSocket, state: ServerState): Promise<void> {
 async function refreshWorkingTree(state: ServerState): Promise<void> {
   let raw: string;
   try {
-    raw = await captureWorkingTreeDiff(state.cwd);
+    raw = await captureWorkingTreeDiff(state.cwd, state.baseRef);
   } catch (err) {
     const message =
       err instanceof Error ? err.message : `unexpected working-tree diff error: ${String(err)}`;
@@ -163,6 +170,7 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
     diffFile: opts.diffFile,
     ...(opts.diffLabel !== undefined ? { diffLabel: opts.diffLabel } : {}),
     volatile: opts.volatile ?? false,
+    ...(opts.baseRef !== undefined ? { baseRef: opts.baseRef } : {}),
   };
 
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1_048_576 });
