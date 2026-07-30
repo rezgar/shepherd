@@ -302,6 +302,12 @@ async function main() {
 
   // Lines-changed indicator (top bar) — computed independently of the
   // askdiff instance itself; must never wait on that (heavier) process.
+  // `computeDiffStat` itself de-dupes concurrent calls for the same cwd
+  // (see diffStat.ts) — that used to be this file's responsibility via a
+  // caller-side map, but a caller-side guard is one omission away from
+  // reintroducing the exact pile-up that crashed the daemon in production
+  // (#89), so it now lives inside `computeDiffStat` and can't be forgotten.
+  //
   // `lastLinesChanged` dedupes the *periodic sweep's* re-broadcast so an
   // unchanged working tree doesn't re-push an identical message to
   // connections that are already showing the current value every 3s tick.
