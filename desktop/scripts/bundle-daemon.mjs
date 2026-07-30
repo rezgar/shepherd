@@ -43,6 +43,17 @@ await build({
 });
 console.log('bundled parse worker → desktop/build/parseWorker.cjs');
 
+// 1c. Stage the vendored askdiff UI as a sibling of daemon.cjs (extraResources
+//     in package.json) — static-server.ts serves it from `resolve(__dirname,
+//     'ui-dist')`, which in the packaged app is daemon.cjs's own directory.
+//     It's pre-built, checked-in output (see server/vendor/askdiff/VENDORED.md),
+//     not something esbuild bundles, so it's a plain copy, not a build step.
+const uiDistSrc = path.join(repoRoot, 'server', 'vendor', 'askdiff', 'ui-dist');
+const uiDistDest = path.join(desktop, 'build', 'ui-dist');
+await rm(uiDistDest, { recursive: true, force: true });
+await cp(uiDistSrc, uiDistDest, { recursive: true });
+console.log('staged askdiff ui-dist → desktop/build/ui-dist');
+
 // 2. Stage node-pty + its installed platform prebuilt into build/daemon-modules,
 //    which electron-builder ships as the daemon's node_modules (extraResources).
 const modsDir = path.join(desktop, 'build', 'daemon-modules');

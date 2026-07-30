@@ -36,7 +36,8 @@
       { "from": "build/web", "to": "web" },
       { "from": "build/daemon.cjs", "to": "daemon/daemon.cjs" },
       { "from": "build/parseWorker.cjs", "to": "daemon/parseWorker.cjs" },
-      { "from": "build/daemon-modules", "to": "daemon/node_modules" }
+      { "from": "build/daemon-modules", "to": "daemon/node_modules" },
+      { "from": "build/ui-dist", "to": "daemon/ui-dist" }
     ],
     "npmRebuild": false,
     "win": {
