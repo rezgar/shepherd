@@ -85,6 +85,101 @@ describe('computeDiffStat', () => {
     expect(await computeDiffStat(dir)).toEqual({ added: 3, removed: 0 });
   });
 
+  it('counts commits ahead of main, not just uncommitted changes', async () => {
+    writeFileSync(join(dir, 'tracked.ts'), 'line one\n');
+    git(dir, 'add', 'tracked.ts');
+    git(dir, 'commit', '-q', '-m', 'initial');
+
+    git(dir, 'checkout', '-q', '-b', 'feature');
+    writeFileSync(join(dir, 'tracked.ts'), 'line one\nline two\n');
+    git(dir, 'add', 'tracked.ts');
+    git(dir, 'commit', '-q', '-m', 'committed on branch');
+
+    // A `HEAD`-only diff would see this as clean (0/0) — the whole point
+    // of comparing against main is to still count the committed line.
+    expect(await computeDiffStat(dir)).toEqual({ added: 1, removed: 0 });
+  });
+
+  it('sums commits ahead of main with uncommitted changes on top', async () => {
+    writeFileSync(join(dir, 'tracked.ts'), 'line one\n');
+    git(dir, 'add', 'tracked.ts');
+    git(dir, 'commit', '-q', '-m', 'initial');
+
+    git(dir, 'checkout', '-q', '-b', 'feature');
+    writeFileSync(join(dir, 'tracked.ts'), 'line one\nline two\n');
+    git(dir, 'add', 'tracked.ts');
+    git(dir, 'commit', '-q', '-m', 'committed on branch');
+    writeFileSync(join(dir, 'tracked.ts'), 'line one\nline two\nline three\n');
+
+    expect(await computeDiffStat(dir)).toEqual({ added: 2, removed: 0 });
+  });
+
+  it("ignores commits landed on main after the branch forked", async () => {
+    writeFileSync(join(dir, 'tracked.ts'), 'line one\n');
+    git(dir, 'add', 'tracked.ts');
+    git(dir, 'commit', '-q', '-m', 'initial');
+
+    git(dir, 'checkout', '-q', '-b', 'feature');
+    writeFileSync(join(dir, 'feature.ts'), 'a\n');
+    git(dir, 'add', 'feature.ts');
+    git(dir, 'commit', '-q', '-m', 'feature work');
+
+    git(dir, 'checkout', '-q', 'main');
+    writeFileSync(join(dir, 'unrelated.ts'), 'b\nc\n');
+    git(dir, 'add', 'unrelated.ts');
+    git(dir, 'commit', '-q', '-m', 'unrelated main progress');
+    git(dir, 'checkout', '-q', 'feature');
+
+    // A tip-of-main diff would count the 2 unrelated lines added to main as
+    // if this branch removed them; the merge-base must exclude that.
+    expect(await computeDiffStat(dir)).toEqual({ added: 1, removed: 0 });
+  });
+
+  it('falls back to master when there is no local main', async () => {
+    const masterDir = mkdtempSync(join(tmpdir(), 'shepherd-diffstat-master-'));
+    try {
+      git(masterDir, 'init', '-q', '-b', 'master');
+      git(masterDir, 'config', 'user.email', 'test@example.com');
+      git(masterDir, 'config', 'user.name', 'Test');
+      writeFileSync(join(masterDir, 'tracked.ts'), 'line one\n');
+      git(masterDir, 'add', 'tracked.ts');
+      git(masterDir, 'commit', '-q', '-m', 'initial');
+
+      git(masterDir, 'checkout', '-q', '-b', 'feature');
+      writeFileSync(join(masterDir, 'tracked.ts'), 'line one\nline two\n');
+      git(masterDir, 'add', 'tracked.ts');
+      git(masterDir, 'commit', '-q', '-m', 'committed on branch');
+
+      expect(await computeDiffStat(masterDir)).toEqual({ added: 1, removed: 0 });
+    } finally {
+      rmSync(masterDir, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to HEAD when neither main nor master exists locally', async () => {
+    const customDir = mkdtempSync(join(tmpdir(), 'shepherd-diffstat-custom-'));
+    try {
+      git(customDir, 'init', '-q', '-b', 'trunk');
+      git(customDir, 'config', 'user.email', 'test@example.com');
+      git(customDir, 'config', 'user.name', 'Test');
+      writeFileSync(join(customDir, 'tracked.ts'), 'line one\n');
+      git(customDir, 'add', 'tracked.ts');
+      git(customDir, 'commit', '-q', '-m', 'initial');
+
+      writeFileSync(join(customDir, 'tracked.ts'), 'line one\nline two\n');
+      expect(await computeDiffStat(customDir)).toEqual({ added: 1, removed: 0 });
+
+      // Committing that change means it's no longer visible in a
+      // `HEAD`-only diff — proving there's genuinely no main/master
+      // fallback silently kicking in here.
+      git(customDir, 'add', 'tracked.ts');
+      git(customDir, 'commit', '-q', '-m', 'committed');
+      expect(await computeDiffStat(customDir)).toEqual({ added: 0, removed: 0 });
+    } finally {
+      rmSync(customDir, { recursive: true, force: true });
+    }
+  });
+
   // Regression coverage for #89: the daemon crashed in production because
   // a computation slower than a 3s poll interval let every subsequent
   // caller start ANOTHER full computation on top of the one still

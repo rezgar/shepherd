@@ -21,10 +21,13 @@ export interface DiffStat {
   removed: number;
 }
 
-// git's canonical empty-tree object — see working-tree-diff.ts in the
-// vendored askdiff server for the matching fallback (this stat must agree
-// with what that computation would show).
+// git's canonical empty-tree object — used as a last-resort diff base when
+// there's no commit history yet (a brand-new repo), so "everything on disk
+// is new" rather than surfacing a ref-resolution error.
 const EMPTY_TREE_SHA = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
+// Checked in order — the first one that resolves locally wins.
+const MAIN_BRANCH_CANDIDATES = ['main', 'master'];
 
 // In-flight computations, keyed by cwd (what the computation actually
 // depends on, not any caller-specific id) — de-dupes concurrent requests
@@ -42,11 +45,20 @@ const EMPTY_TREE_SHA = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 // reintroduce by construction.
 const inFlight = new Map<string, Promise<DiffStat | null>>();
 
-/** Working-tree diff stat for `cwd` — uncommitted (tracked) changes plus
- *  untracked files, computed the same way the vendored askdiff instance's
- *  own working-tree capture does (tracked via `git diff HEAD`, untracked
- *  unioned in via `--no-index` against `/dev/null`), so this number always
- *  agrees with what the diff panel shows once opened.
+/** Diff stat for `cwd`, scoped to what this branch/worktree actually
+ *  contributes: everything since it forked from `main` (or `master` if
+ *  there's no local `main`), plus any uncommitted/untracked changes on top.
+ *  Diffs against the *merge-base* with that branch rather than its tip, so
+ *  commits landed on main after this branch forked aren't counted as this
+ *  branch's own changes. Falls back to comparing against `HEAD`
+ *  (uncommitted changes only) when neither `main` nor `master` resolves
+ *  locally.
+ *
+ *  Note this means the count no longer always matches the embedded askdiff
+ *  panel opened by clicking the pill — that vendored instance always shows
+ *  a working-tree-vs-`HEAD` diff (see working-tree-diff.ts) with no
+ *  base-ref option. Accepted tradeoff (#94): the pill's job is to reflect
+ *  "how much has this branch changed", not to mirror the panel exactly.
  *
  *  Deliberately uncached, unlike `repoSlug`/`issueTitle` in scan.ts: those
  *  cache static facts that don't change once known; this reflects live
@@ -73,9 +85,13 @@ async function computeDiffStatUncached(cwd: string): Promise<DiffStat | null> {
     .catch(() => false);
   if (!isGitRepo) return null;
 
-  // `HEAD` may not resolve yet (a brand-new repo with no commits) — fall
-  // back to the empty tree rather than surfacing the ref-resolution error.
+  // Prefer the merge-base with main/master; fall back to `HEAD` (no such
+  // branch found locally), then to the empty tree (`HEAD` itself doesn't
+  // resolve yet — a brand-new repo with no commits) rather than surfacing
+  // a ref-resolution error.
+  const base = await resolveDiffBase(cwd);
   const tracked =
+    (base !== null ? await numstat(cwd, ['diff', base, '--numstat']) : null) ??
     (await numstat(cwd, ['diff', 'HEAD', '--numstat'])) ??
     (await numstat(cwd, ['diff', EMPTY_TREE_SHA, '--numstat'])) ?? { added: 0, removed: 0 };
 
@@ -95,6 +111,33 @@ async function computeDiffStatUncached(cwd: string): Promise<DiffStat | null> {
   }
 
   return { added, removed };
+}
+
+/** Resolves the diff base as the merge-base of `HEAD` and whichever of
+ *  `main`/`master` exists as a *local* branch (worktrees share refs with
+ *  the main checkout, so this resolves correctly even when the branch
+ *  itself is checked out elsewhere). Returns `null` — letting the caller
+ *  fall back to `HEAD` — when neither branch exists locally, or `HEAD`
+ *  doesn't resolve yet. */
+async function resolveDiffBase(cwd: string): Promise<string | null> {
+  for (const candidate of MAIN_BRANCH_CANDIDATES) {
+    const exists = await pexec('git', ['rev-parse', '--verify', '--quiet', candidate], {
+      cwd,
+      timeout: GIT_TIMEOUT_MS,
+    })
+      .then(() => true)
+      .catch(() => false);
+    if (!exists) continue;
+
+    const mergeBase = await pexec('git', ['merge-base', candidate, 'HEAD'], {
+      cwd,
+      timeout: GIT_TIMEOUT_MS,
+    })
+      .then(({ stdout }) => stdout.trim())
+      .catch(() => null);
+    if (mergeBase) return mergeBase;
+  }
+  return null;
 }
 
 /** Maps `items` through `fn`, running at most `concurrency` calls at once —
