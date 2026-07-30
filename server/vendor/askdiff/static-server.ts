@@ -9,8 +9,18 @@ import { readFile, stat } from "node:fs/promises";
 import { dirname, extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const UI_DIR = resolve(__dirname, "ui-dist");
+// esbuild strips `import.meta` to `{}` when bundling this to CJS for the
+// packaged desktop app (desktop/scripts/bundle-daemon.mjs), so
+// `fileURLToPath(import.meta.url)` throws on `undefined` and kills the
+// daemon at require-time. The CJS `__dirname` global esbuild shims in is
+// tried first; the ESM path only applies under a real `tsx` dev run — same
+// problem/fix as rawParsePool.ts's resolveHere().
+function resolveHere(): string {
+  if (typeof __dirname === "string" && __dirname) return __dirname;
+  return dirname(fileURLToPath(import.meta.url));
+}
+const here = resolveHere();
+const UI_DIR = resolve(here, "ui-dist");
 const INDEX_HTML = join(UI_DIR, "index.html");
 
 // Adapted from the fork's packages/cli/src/server-bundle.ts — see
