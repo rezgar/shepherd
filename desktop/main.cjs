@@ -12,7 +12,7 @@
 //    (ELECTRON_RUN_AS_NODE) so no system Node is needed, and loads the built
 //    web UI from disk. Also checks GitHub Releases for updates (ever-green).
 
-const { app, BrowserWindow, shell, dialog } = require('electron');
+const { app, BrowserWindow, Menu, shell, dialog } = require('electron');
 const { spawn, execSync } = require('node:child_process');
 const net = require('node:net');
 const http = require('node:http');
@@ -276,34 +276,137 @@ async function promptInstall(autoUpdater, info) {
   autoUpdater.quitAndInstall();
 }
 
-/** Ever-green: PERIODICALLY (not at launch) check GitHub Releases, download
- *  newer builds in the background, and prompt for consent before installing —
- *  never install silently. Packaged only (the updater needs the app-update.yml
- *  electron-builder emits). Failures are non-fatal — offline just skips a tick. */
-function startUpdateChecks() {
-  if (!app.isPackaged) return;
-  let autoUpdater;
+/** Lazily creates and configures the `electron-updater` singleton exactly
+ *  once, so the periodic background check and a manual "check now" click
+ *  share the same instance and listeners instead of each registering its
+ *  own — repeated menu clicks would otherwise pile up duplicate
+ *  `update-downloaded` handlers. Packaged only (the updater needs the
+ *  app-update.yml electron-builder emits); returns null in dev builds or
+ *  if the module fails to load, and every caller must handle that. */
+let sharedUpdater;
+let updaterInitAttempted = false;
+function getUpdater() {
+  if (updaterInitAttempted) return sharedUpdater ?? null;
+  updaterInitAttempted = true;
+  if (!app.isPackaged) return null;
   try {
-    ({ autoUpdater } = require('electron-updater'));
+    ({ autoUpdater: sharedUpdater } = require('electron-updater'));
   } catch (e) {
     console.error('[desktop] updater unavailable:', e?.message ?? e);
-    return;
+    return null;
   }
-  autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = false; // nothing installs without explicit consent
-  autoUpdater.on('error', (e) => console.error('[desktop] update error:', e?.message ?? e));
-  autoUpdater.on('update-downloaded', (info) => {
+  sharedUpdater.autoDownload = true;
+  sharedUpdater.autoInstallOnAppQuit = false; // nothing installs without explicit consent
+  sharedUpdater.on('error', (e) => console.error('[desktop] update error:', e?.message ?? e));
+  sharedUpdater.on('update-downloaded', (info) => {
     if (info?.version && info.version === promptedVersion) return; // don't nag for the same build
     promptedVersion = info?.version ?? null;
-    void promptInstall(autoUpdater, info);
+    void promptInstall(sharedUpdater, info);
   });
+  return sharedUpdater;
+}
+
+/** Ever-green: PERIODICALLY (not at launch) check GitHub Releases, download
+ *  newer builds in the background, and prompt for consent before installing —
+ *  never install silently. Failures are non-fatal — offline just skips a tick. */
+function startUpdateChecks() {
+  const updater = getUpdater();
+  if (!updater) return;
   // First check one interval in — deliberately nothing at startup.
   setInterval(() => {
-    autoUpdater.checkForUpdates().catch((e) => console.error('[desktop] update check failed:', e?.message ?? e));
+    updater.checkForUpdates().catch((e) => console.error('[desktop] update check failed:', e?.message ?? e));
   }, UPDATE_CHECK_INTERVAL_MS);
 }
 
+/** True while a manually-triggered check is in flight — guards against a
+ *  double-click (or repeated menu selection) stacking overlapping checks
+ *  and overlapping "you're up to date" dialogs. */
+let manualCheckInFlight = false;
+
+/** Menu-triggered "Check for Updates Now". Reuses the same shared updater
+ *  and its existing `update-downloaded` → install-prompt flow, but adds
+ *  one-shot feedback the silent background check doesn't need: a user who
+ *  just clicked a menu item deserves to know the click did something, so
+ *  "nothing new" gets an explicit notice instead of quietly doing nothing. */
+async function checkForUpdatesNow() {
+  if (manualCheckInFlight) return;
+  const updater = getUpdater();
+  if (!updater) {
+    await dialog.showMessageBox({
+      type: 'info',
+      title: 'Check for Updates',
+      message: 'Updates are only available in packaged builds, not this dev build.',
+    });
+    return;
+  }
+
+  manualCheckInFlight = true;
+  let notified = false;
+  // `update-available` needs no handler of its own here — the shared
+  // `update-downloaded` listener (registered once in getUpdater) picks up
+  // from there and shows the existing install prompt once the download
+  // finishes; this call just needs to not ALSO show "up to date" in that
+  // case, which not attaching an update-available listener here ensures.
+  const onNotAvailable = () => {
+    notified = true;
+    void dialog.showMessageBox({
+      type: 'info',
+      title: 'Check for Updates',
+      message: `You're up to date (Shepherd ${app.getVersion()}).`,
+    });
+  };
+  updater.once('update-not-available', onNotAvailable);
+
+  try {
+    const result = await updater.checkForUpdates();
+    // Some platforms/versions don't emit update-not-available at all — a
+    // result with no update info means nothing was found regardless, and
+    // `notified` avoids double-showing the notice if it already fired.
+    if (!notified && result && !result.updateInfo) {
+      await dialog.showMessageBox({
+        type: 'info',
+        title: 'Check for Updates',
+        message: `You're up to date (Shepherd ${app.getVersion()}).`,
+      });
+    }
+  } catch (e) {
+    console.error('[desktop] manual update check failed:', e?.message ?? e);
+    await dialog.showMessageBox({
+      type: 'error',
+      title: 'Check for Updates',
+      message: `Couldn't check for updates: ${e?.message ?? String(e)}`,
+    });
+  } finally {
+    updater.removeListener('update-not-available', onNotAvailable);
+    manualCheckInFlight = false;
+  }
+}
+
+function buildMenu() {
+  const isMac = process.platform === 'darwin';
+  const template = [
+    ...(isMac ? [{ role: 'appMenu' }] : []),
+    {
+      label: 'File',
+      submenu: [
+        {
+          label: 'Check for Updates Now',
+          enabled: app.isPackaged,
+          click: () => void checkForUpdatesNow(),
+        },
+        { type: 'separator' },
+        isMac ? { role: 'close' } : { role: 'quit' },
+      ],
+    },
+    { role: 'editMenu' },
+    { role: 'viewMenu' },
+    { role: 'windowMenu' },
+  ];
+  return Menu.buildFromTemplate(template);
+}
+
 app.whenReady().then(async () => {
+  Menu.setApplicationMenu(buildMenu());
   await ensureDaemon();
   await createWindow();
   startUpdateChecks();
