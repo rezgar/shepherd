@@ -535,7 +535,35 @@ async function main() {
 
   // depth 3 so a session's subagents/agent-<id>.jsonl (one level deeper than
   // the session file itself) is watched too, for live subagent-modal updates.
-  const watcher = chokidar.watch(PROJECTS_DIR, { ignoreInitial: true, depth: 3 });
+  //
+  // usePolling — deliberate, and NOT the chokidar default. Confirmed live
+  // (see daemon-output.log from 2026-07-31): the default native-watch mode
+  // (fs.watch, via chokidar's `_handleDir`) accumulates FSWatcher handles
+  // without bound on this machine — one occurrence reached 274,000+
+  // FSWatcher handles / 10+ GB RSS and crashed the whole desktop app, with
+  // literally nothing else logged during the climb (ruling out a loud retry
+  // loop). Root-caused to chokidar's own native-watch code path: unlike its
+  // polling path (fs.watchFile, deduped via an internal path-keyed map —
+  // see FsWatchFileInstances in chokidar's handler.js), `_handleDir` creates
+  // a fresh native watcher on every call with NO check for an existing one
+  // on the same path — confirmed by reading chokidar 4.0.3 AND the latest
+  // 5.0.0's source, where this specific gap is still unfixed (a sibling gap
+  // in `_handleFile` WAS fixed in 5.0.0, `_handleDir` wasn't). Never
+  // reproduced the exact trigger in isolation despite matching production
+  // closely (same Node runtime via ELECTRON_RUN_AS_NODE, the real
+  // ~/.claude/projects tree, real concurrent session activity) — it likely
+  // needs conditions from the full daemon (concurrent askdiff watchers, PTY
+  // relay load) that isolated repros didn't reproduce. Polling sidesteps
+  // the buggy code path entirely rather than depending on finding the exact
+  // trigger. 2s interval trades a couple seconds of update latency for
+  // never touching native watch handles — cheap for the few thousand files
+  // typically under this directory.
+  const watcher = chokidar.watch(PROJECTS_DIR, {
+    ignoreInitial: true,
+    depth: 3,
+    usePolling: true,
+    interval: 2_000,
+  });
   watcher.on('add', onEvt).on('change', onEvt).on('unlink', onEvt);
   // An EventEmitter's 'error' event throws synchronously if nothing's
   // listening for it — the top-level uncaughtException handler above would
