@@ -62,11 +62,14 @@ export interface Shepherd {
   /** Working-tree lines-changed count for the focused session — null when
    *  there's nothing to show (clean tree, or not a git repo). */
   linesChanged: { added: number; removed: number } | null;
-  /** Port of the pre-warmed askdiff instance for the focused session, once
-   *  ready — null while still starting (or nothing focused). */
-  askdiffPort: number | null;
-  /** Set if the askdiff instance failed to start for the focused session. */
-  askdiffError: string | null;
+  /** Askdiff instance port/error per session, keyed by sessionId — kept for
+   *  every session ever focused this app-session (not just the currently
+   *  focused one, and never cleared on focus/unfocus) so a pooled askdiff
+   *  iframe can find its session's port again after switching away and
+   *  back, instead of every switch looking like a fresh "Starting diff
+   *  view…". A session with no entry yet is still starting (focus() always
+   *  triggers a spawn; the reply just hasn't landed). */
+  askdiffState: Map<string, { port: number | null; error: string | null }>;
   /** Ask the daemon to spawn a fresh session. `cwd` is required for a brand
    *  new product with no existing card to derive a repo root from — omit it
    *  to reuse an already-known product's repo root. */
@@ -146,8 +149,9 @@ export function useShepherd(): Shepherd {
   const [termResetKey, setTermResetKey] = useState('');
   const [termError, setTermError] = useState<string | null>(null);
   const [linesChanged, setLinesChanged] = useState<{ added: number; removed: number } | null>(null);
-  const [askdiffPort, setAskdiffPort] = useState<number | null>(null);
-  const [askdiffError, setAskdiffError] = useState<string | null>(null);
+  const [askdiffState, setAskdiffState] = useState<Map<string, { port: number | null; error: string | null }>>(
+    () => new Map(),
+  );
   const [activeSubagents, setActiveSubagents] = useState<SubagentInfo[]>([]);
   // product -> request timestamp, cleared once a fresher session shows up in
   // that group's snapshot, on a spawn-error, or after a safety timeout.
@@ -277,13 +281,9 @@ export function useShepherd(): Shepherd {
           if (d.sessionId !== focusRef.current?.sessionId) return;
           setLinesChanged(typeof d.added === 'number' ? { added: d.added, removed: d.removed } : null);
         } else if (d.type === 'askdiffReady') {
-          if (d.sessionId !== focusRef.current?.sessionId) return;
-          setAskdiffError(null);
-          setAskdiffPort(d.port);
+          setAskdiffState((prev) => new Map(prev).set(d.sessionId, { port: d.port, error: null }));
         } else if (d.type === 'askdiffError') {
-          if (d.sessionId !== focusRef.current?.sessionId) return;
-          setAskdiffPort(null);
-          setAskdiffError(d.message);
+          setAskdiffState((prev) => new Map(prev).set(d.sessionId, { port: null, error: d.message }));
         }
       };
       ws.onclose = () => {
@@ -311,8 +311,6 @@ export function useShepherd(): Shepherd {
     setActiveSubagents([]);
     setSubagentModal(null);
     setLinesChanged(null);
-    setAskdiffPort(null);
-    setAskdiffError(null);
     wsSend(wsRef.current, { type: 'focus', file, sessionId });
     wsSend(wsRef.current, { type: 'unfocusSubagent' });
   }, []);
@@ -324,8 +322,6 @@ export function useShepherd(): Shepherd {
     setActiveSubagents([]);
     setSubagentModal(null);
     setLinesChanged(null);
-    setAskdiffPort(null);
-    setAskdiffError(null);
     wsSend(wsRef.current, { type: 'unfocus' });
     wsSend(wsRef.current, { type: 'unfocusSubagent' });
   }, []);
@@ -437,8 +433,7 @@ export function useShepherd(): Shepherd {
     termResetKey,
     termError,
     linesChanged,
-    askdiffPort,
-    askdiffError,
+    askdiffState,
     attachTerminal,
     detachTerminal,
     sendTermInput,

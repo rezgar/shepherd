@@ -38,8 +38,7 @@ export function App() {
     termResetKey,
     termError,
     linesChanged,
-    askdiffPort,
-    askdiffError,
+    askdiffState,
     attachTerminal,
     detachTerminal,
     subscribeTerminal,
@@ -329,8 +328,7 @@ export function App() {
           termResetKey={termResetKey}
           termError={termError}
           linesChanged={linesChanged}
-          askdiffPort={askdiffPort}
-          askdiffError={askdiffError}
+          askdiffState={askdiffState}
           onAttachTerminal={attachTerminal}
           onDetachTerminal={detachTerminal}
           onResizeTerm={resizeTerm}

@@ -41,6 +41,16 @@ embedded here instead of just shelling out to `npx askdiff`.
      (resolved once at watch setup). This changed `watchWorkingTree`'s
      signature from sync to async (`server/index.ts`'s one call site now
      awaits it).
+  3. `claude.ts`'s `streamAnswer` had no bound on how long it would wait for
+     the next byte of `claude -p --resume` output. A stalled child process
+     (hung CLI, a concurrent `--resume` colliding with the session's own
+     interactive process — see `sender.ts`'s `isSessionLiveElsewhere` doc
+     comment for that hazard — network stall, anything) left the ask stuck
+     in "streaming" state forever with zero client-side feedback: no
+     `chunk`, `done`, or `error` ever arrived. Added an idle timeout
+     (`util/idleTimeout.ts`, `ASK_IDLE_TIMEOUT_MS` in `util/constants.ts`),
+     reset on every stdout chunk, that kills the child and surfaces a clear
+     `ClaudeCliError` instead of hanging indefinitely.
 - `ui-dist/` — the **pre-built** static UI bundle (`pnpm run build` output
   from the fork's `packages/ui-browser`), not source. Rebuilding it here
   would mean pulling React 19/Vite/Tailwind v4/react-diff-view/etc. into
