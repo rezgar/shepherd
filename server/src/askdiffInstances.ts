@@ -12,6 +12,20 @@ import { resolveDiffBase } from './diffStat.js';
 const IDLE_EVICT_MS = 10 * 60_000;
 const EVICT_SWEEP_MS = 5 * 60_000;
 
+// Instances are keyed by sessionId, not cwd — two sessions in the same
+// project each get their own independent chokidar watcher + working-tree
+// diff computation over the identical directory, reacting to the identical
+// file-change events. That's pure waste, but collapsing it properly means
+// sharing the watcher/diff while keeping askdiff's per-session "Ask" bridge
+// (a `claude --resume <thatSession>` conversation) intact — a real
+// restructuring of the vendored server, not a quick fix. This cap is the
+// safe stopgap: however many sessions get focused, no more than this many
+// redundant watchers are ever alive at once. Confirmed live: an unbounded
+// count of these compounding (each with its own uncapped git-subprocess
+// fanout, see working-tree-diff.ts) ran a daemon to 1M+ handles and 10+ GB
+// RSS within seconds of opening a second session in an already-open project.
+const MAX_CONCURRENT_INSTANCES = 4;
+
 interface AskdiffInstance {
   handle: ServerHandle;
   httpServer: HttpServer;
@@ -104,7 +118,7 @@ export async function getOrSpawnAskdiffInstance(
 
   let spawnPromise = spawning.get(sessionId);
   if (!spawnPromise) {
-    spawnPromise = spawnInstance(cwd, claudeSessionId);
+    spawnPromise = evictLruNonFocusedIfAtCap().then(() => spawnInstance(cwd, claudeSessionId));
     spawning.set(sessionId, spawnPromise);
     // A `.finally()` derived from a rejecting promise itself rejects with
     // the same error — a SEPARATE promise chain from the `await
@@ -198,6 +212,25 @@ async function evict(sessionId: string, instance: AskdiffInstance): Promise<void
   await instance.handle.close().catch(() => {});
   await new Promise<void>((resolve) => instance.httpServer.close(() => resolve()));
   await rm(instance.diffDir, { recursive: true, force: true }).catch(() => {});
+}
+
+/** Frees a slot for a new instance when at MAX_CONCURRENT_INSTANCES, by
+ *  evicting the least-recently-active instance that isn't currently focused
+ *  by any connection. If every live instance is focused (all genuinely in
+ *  use right now), does nothing — briefly exceeding the cap beats yanking a
+ *  diff panel out from under someone actively looking at it. */
+async function evictLruNonFocusedIfAtCap(): Promise<void> {
+  if (instances.size < MAX_CONCURRENT_INSTANCES) return;
+  let lruId: string | null = null;
+  let lruInstance: AskdiffInstance | null = null;
+  for (const [sessionId, instance] of instances) {
+    if (isFocusedForAskdiff(sessionId)) continue;
+    if (!lruInstance || instance.lastActivity < lruInstance.lastActivity) {
+      lruId = sessionId;
+      lruInstance = instance;
+    }
+  }
+  if (lruId && lruInstance) await evict(lruId, lruInstance);
 }
 
 let sweepTimer: ReturnType<typeof setInterval> | null = null;

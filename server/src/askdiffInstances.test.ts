@@ -156,4 +156,30 @@ describe('askdiffInstances', () => {
       vi.useRealTimers();
     }
   });
+
+  it('evicts the least-recently-active non-focused instance when spawning would exceed the concurrency cap', async () => {
+    // Matches MAX_CONCURRENT_INSTANCES in askdiffInstances.ts. Regression
+    // test for opening session after session in the same project (all
+    // sharing this one `dir`) accumulating unbounded redundant instances —
+    // each one its own chokidar watcher over the identical directory.
+    const CAP = 4;
+    const sessions = Array.from({ length: CAP }, () => randomUUID());
+    const ports: number[] = [];
+    for (const sessionId of sessions) {
+      const result = await getOrSpawnAskdiffInstance(sessionId, dir, sessionId);
+      expect(result.ok).toBe(true);
+      if (result.ok) ports.push(result.port);
+    }
+
+    // A 5th, unfocused session in the same project pushes past the cap.
+    const extra = await getOrSpawnAskdiffInstance(randomUUID(), dir, randomUUID());
+    expect(extra.ok).toBe(true);
+
+    // The least-recently-active session (the first spawned) should have
+    // been evicted to make room — its next request respawns on a new port
+    // rather than reusing the original.
+    const respawned = await getOrSpawnAskdiffInstance(sessions[0], dir, sessions[0]);
+    expect(respawned.ok).toBe(true);
+    expect(respawned.ok && respawned.port !== ports[0]).toBe(true);
+  });
 });

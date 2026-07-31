@@ -14,7 +14,15 @@ embedded here instead of just shelling out to `npx askdiff`.
   Q&A bridge, diff parsing/staleness/working-tree-capture/watch utilities).
   Relative imports rewritten from the `@askdiff/protocol` package specifier
   to plain relative paths, and given `.js` extensions to match this repo's
-  own import convention — no other logic changes.
+  own import convention. One further deliberate change: `util/working-tree-diff.ts`'s
+  untracked-file diffing fanned every untracked file out via a single
+  unbounded `Promise.all`, spawning one `git` subprocess per file
+  simultaneously with no cap. Fine for a one-shot CLI diff, but this runs on
+  every filesystem-event refresh of a live (`volatile`) working-tree
+  session — confirmed live to run Shepherd's daemon to 1M+ handles and
+  10+ GB RSS within seconds, once a project had any real number of
+  untracked files plus ambient file churn. Capped to a small (8) worker
+  pool instead of the unbounded fan-out.
 - `ui-dist/` — the **pre-built** static UI bundle (`pnpm run build` output
   from the fork's `packages/ui-browser`), not source. Rebuilding it here
   would mean pulling React 19/Vite/Tailwind v4/react-diff-view/etc. into

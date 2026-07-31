@@ -10,6 +10,33 @@ const EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 const MAX_BUFFER = 64 * 1024 * 1024;
 
+// Deliberate deviation from the vendored fork (see VENDORED.md): the
+// original fans untracked files out via a single unbounded `Promise.all`,
+// spawning one `git` subprocess per file simultaneously with no cap. This
+// runs on every filesystem-event refresh of a live working-tree session —
+// for a project with any real number of untracked files plus ambient file
+// churn (a build watcher, autosave, logs), repeated unbounded spawns
+// compound faster than Windows can reap them, confirmed live to run a
+// daemon process to 1M+ handles and 10+ GB RSS within seconds. Capped to a
+// small worker pool instead.
+const MAX_CONCURRENT_UNTRACKED_DIFFS = 8;
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    for (let i = next++; i < items.length; i = next++) {
+      results[i] = await fn(items[i]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 // Recomputes the working-tree diff, mirroring the `askdiff` skill's own
 // Step 2 bash (tracked changes via `git diff HEAD`, untracked files
 // unioned in via `--no-index` since `git diff HEAD` never shows them).
