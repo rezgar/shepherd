@@ -794,8 +794,15 @@ body {
   min-height: 0;
   display: flex;
 }
-.askdiff-view__frame {
+.askdiff-view__frame-wrap {
   flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+.askdiff-view__frame {
+  display: block;
   border: none;
   background: #fff;
 }

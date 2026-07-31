@@ -18,19 +18,39 @@ function isAskdiffEscapeMessage(data: unknown): boolean {
  *  to a fresh connection); destroying and recreating the iframe on every
  *  panel close or session switch silently wiped that history. The caller
  *  (FocusView's pool) is expected to keep one AskdiffView mounted per
- *  visited session for the life of the pool, only ever flipping `visible`. */
+ *  visited session for the life of the pool, only ever flipping `visible`.
+ *
+ *  `fontSize` (the same value driving the terminal's own A−/A+ controls)
+ *  scales the whole embedded page via CSS `zoom` — there's no way to reach
+ *  into a cross-origin iframe's own font-size, and askdiff's UI has no
+ *  API/message for it either (its only inbound channel is the escape
+ *  relay). `zoom` on the iframe itself asks Chromium to render that page
+ *  at a different effective DPI (real reflow, not a blurry pixel stretch),
+ *  same as the browser's own page-zoom would. Confirmed live: a plain
+ *  `width: 100%; height: 100%` alongside `zoom` already fills the
+ *  container exactly at any zoom level — the percentages resolve against
+ *  the wrapper's real (unzoomed) size and the zoomed content reflows to
+ *  fit that resolved box, no inverse-percentage compensation needed
+ *  (tried that first; it left a gap, since it was solving a problem `zoom`
+ *  doesn't actually have here). Sized via a wrapper so the flex-item
+ *  sizing this used to have directly lives on a plain, unzoomed element —
+ *  zoom is applied to the LEAF element so it can't also disturb the flex
+ *  layout that positions it. */
 export function AskdiffView({
   visible,
   port,
   error,
+  fontSize,
   onEscape,
 }: {
   visible: boolean;
   port: number | null;
   error: string | null;
+  fontSize: number;
   onEscape: () => void;
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const zoom = fontSize / 14;
 
   // Escape typed while focus is inside the iframe fires in ITS OWN
   // document/window, never reaching a parent-side keydown listener —
@@ -61,7 +81,15 @@ export function AskdiffView({
           <p>Starting diff view…</p>
         </div>
       ) : (
-        <iframe ref={iframeRef} className="askdiff-view__frame" src={`http://localhost:${port}/`} title="Diff view" />
+        <div className="askdiff-view__frame-wrap">
+          <iframe
+            ref={iframeRef}
+            className="askdiff-view__frame"
+            src={`http://localhost:${port}/`}
+            title="Diff view"
+            style={{ zoom, width: "100%", height: "100%" }}
+          />
+        </div>
       )}
     </div>
   );
