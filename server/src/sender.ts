@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { readFile as readFileAsync, readdir } from 'node:fs/promises';
 import os from 'node:os';
@@ -9,6 +9,9 @@ import { parseSession } from './parse.js';
 import { readHookStates } from './hookState.js';
 import { PROJECTS_DIR } from './scan.js';
 import { SessionScreen } from './sessionScreen.js';
+import { resolveClaudeExecutable } from './claudeExecutable.js';
+
+export { resolveClaudeExecutable } from './claudeExecutable.js';
 
 const pexecFile = promisify(execFile);
 
@@ -31,28 +34,6 @@ const PASTE_DIR = path.join(os.tmpdir(), 'agent-shepherd-pastes');
 // session; a send reuses it if present, spawns (and waits out the startup
 // window) only the first time or after eviction — exactly like typing into
 // a terminal you already have open vs. having to open a new one.
-
-let cachedExe: string | null = null;
-/** Resolve the real `claude` binary, not the `.cmd` shim on PATH — Windows'
- *  CreateProcess (what node-pty uses under the hood) won't run a .cmd
- *  directly, so this reads the shim's own install directory and points at
- *  the .exe it delegates to. No hardcoded per-machine path. */
-export function resolveClaudeExecutable(): string {
-  if (cachedExe) return cachedExe;
-  const isWin = process.platform === 'win32';
-  try {
-    const out = execFileSync(isWin ? 'where' : 'which', [isWin ? 'claude.cmd' : 'claude'], { encoding: 'utf8' })
-      .trim()
-      .split(/\r?\n/)[0]
-      .trim();
-    cachedExe = isWin
-      ? path.join(path.dirname(out), 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe')
-      : out;
-  } catch {
-    cachedExe = isWin ? 'claude.exe' : 'claude';
-  }
-  return cachedExe;
-}
 
 /** This (Node, daemon) process must never hand a spawned `claude` a
  *  CLAUDE_ or ANTHROPIC_ env var of its own — in dev that daemon may itself
