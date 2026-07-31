@@ -159,9 +159,9 @@ describe('askdiffInstances', () => {
 
   it('evicts the least-recently-active non-focused instance when spawning would exceed the concurrency cap', async () => {
     // Matches MAX_CONCURRENT_INSTANCES in askdiffInstances.ts. Regression
-    // test for opening session after session in the same project (all
-    // sharing this one `dir`) accumulating unbounded redundant instances —
-    // each one its own chokidar watcher over the identical directory.
+    // test for opening session after session accumulating unbounded live
+    // instances — each one its own chokidar watcher + diff computation,
+    // with no ceiling on how many run concurrently through the daemon.
     const CAP = 4;
     const sessions = Array.from({ length: CAP }, () => randomUUID());
     const ports: number[] = [];
