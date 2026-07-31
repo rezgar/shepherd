@@ -21,6 +21,7 @@ export function CardStrip({
   stripState,
   onReorderProduct,
   onReorderSession,
+  iconOnly,
 }: {
   agents: AgentModel[];
   focusedId: string;
@@ -34,6 +35,10 @@ export function CardStrip({
   stripState: StripState;
   onReorderProduct: (dragged: string, target: string) => void;
   onReorderSession: (product: string, dragged: string, target: string) => void;
+  /** Collapses every card (and the product tabs / "+" button) to a narrow
+   *  icon rail — used while the askdiff panel is open so switching sessions
+   *  stays possible without costing the diff panel much width. */
+  iconOnly?: boolean;
 }) {
   // Transient drag state — what's being dragged right now. A ref (not state)
   // because it changes many times per drag and never needs to re-render.
@@ -42,7 +47,7 @@ export function CardStrip({
   );
 
   return (
-    <div className="strip">
+    <div className={iconOnly ? 'strip strip--icon-only' : 'strip'}>
       {groupStrip(agents, stripState).map(([product, ags]) => (
         <div
           className="strip__group"
@@ -70,7 +75,7 @@ export function CardStrip({
               drag.current = null;
             }}
           >
-            {product}
+            {iconOnly ? product.slice(0, 1).toUpperCase() : product}
           </div>
           <div className="strip__cards">
             {ags.map((a) => (
@@ -102,6 +107,7 @@ export function CardStrip({
                   agent={a}
                   now={now}
                   compact
+                  iconOnly={iconOnly}
                   selected={a.sessionId === focusedId}
                   onClick={() => onSelect(a)}
                   displayName={nameOf(a)}
@@ -109,14 +115,16 @@ export function CardStrip({
                 />
               </div>
             ))}
-            <button
-              className="new-session-card"
-              disabled={spawningProducts.has(product)}
-              onClick={() => onSpawn(product)}
-              title={`Start a new session in ${product}`}
-            >
-              {spawningProducts.has(product) ? '…' : '+'}
-            </button>
+            {!iconOnly && (
+              <button
+                className="new-session-card"
+                disabled={spawningProducts.has(product)}
+                onClick={() => onSpawn(product)}
+                title={`Start a new session in ${product}`}
+              >
+                {spawningProducts.has(product) ? '…' : '+'}
+              </button>
+            )}
           </div>
         </div>
       ))}

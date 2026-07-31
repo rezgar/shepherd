@@ -195,6 +195,7 @@ export function FocusView({
         stripState={stripState}
         onReorderProduct={onReorderProduct}
         onReorderSession={onReorderSession}
+        iconOnly={showDiff}
       />
 
       <div className="focus__main">
