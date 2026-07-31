@@ -34,8 +34,7 @@ export function FocusView({
   termResetKey,
   termError,
   linesChanged,
-  askdiffPort,
-  askdiffError,
+  askdiffState,
   onAttachTerminal,
   onDetachTerminal,
   onResizeTerm,
@@ -67,8 +66,7 @@ export function FocusView({
   termResetKey: string;
   termError: string | null;
   linesChanged: { added: number; removed: number } | null;
-  askdiffPort: number | null;
-  askdiffError: string | null;
+  askdiffState: Map<string, { port: number | null; error: string | null }>;
   onAttachTerminal: (sessionId: string, cwd: string, cols: number, rows: number) => void;
   onDetachTerminal: (sessionId: string) => void;
   onResizeTerm: (sessionId: string, cols: number, rows: number) => void;
@@ -82,16 +80,53 @@ export function FocusView({
   const name = nameOf(focused);
   const focusRootRef = useRef<HTMLDivElement>(null);
 
-  // Always land back on the terminal when switching sessions — the diff
-  // view is per-session state, not something that should follow you to a
-  // different card. `useLayoutEffect`, not `useEffect`: api.ts's focus()
-  // resets linesChanged/askdiffPort/askdiffError to null in the SAME
-  // commit as the session switch, but this reset lives here, in a
-  // different component's effect — a passive `useEffect` would run after
-  // that commit already painted, showing one visible frame of
-  // `<AskdiffView port={null} error={null}>` ("Starting diff view…") for
-  // the newly-focused session before flipping back to the terminal. The
-  // layout-effect timing (synchronous, pre-paint) closes that gap.
+  // Sessions whose askdiff iframe this FocusView instance is keeping warm —
+  // each stays mounted (just hidden) once added, so its in-memory Q&A store
+  // survives closing the panel and flipping between session cards, rather
+  // than being torn down and rebuilt from scratch every time (see
+  // AskdiffView's doc comment for why that history has nowhere else to
+  // live). Grows lazily: only when the panel is actually opened for a
+  // session, not on every focus (the backend pre-warms an instance on every
+  // focus regardless, but there's no reason to also carry an idle iframe +
+  // WS connection for a session whose diff view was never looked at).
+  // Capped to mirror the daemon's own MAX_CONCURRENT_INSTANCES — no point
+  // keeping more browser-side iframes warm than the backend could
+  // concurrently back anyway; evicting one just means that one session's
+  // panel goes back to a fresh "Starting diff view…" next time, same as
+  // today's behavior for every session.
+  const ASKDIFF_POOL_CAP = 4;
+  const [askdiffPool, setAskdiffPool] = useState<Map<string, number>>(() => new Map());
+  useEffect(() => {
+    if (!showDiff) return;
+    setAskdiffPool((prev) => {
+      const next = new Map(prev);
+      next.set(focused.sessionId, Date.now());
+      if (next.size > ASKDIFF_POOL_CAP) {
+        let evictId: string | null = null;
+        let evictAt = Infinity;
+        for (const [sid, at] of next) {
+          if (sid === focused.sessionId) continue;
+          if (at < evictAt) {
+            evictAt = at;
+            evictId = sid;
+          }
+        }
+        if (evictId) next.delete(evictId);
+      }
+      return next;
+    });
+  }, [showDiff, focused.sessionId]);
+
+  // Always land back on the terminal when switching sessions — whether the
+  // diff panel happens to be open is UI state, not something that should
+  // follow you to a different card (the Q&A *history* underneath it does
+  // persist per-session via the pool above; this is only about which panel
+  // is showing). `useLayoutEffect`, not `useEffect`: a passive effect would
+  // run after the switch's own commit already painted, showing one visible
+  // frame with the new session's `focused.sessionId` but the old
+  // `showDiff`/pool state (either the wrong-looking "diff view followed
+  // you" flash, or a blank slot if the new session has no pool entry yet).
+  // The layout-effect timing (synchronous, pre-paint) closes that gap.
   useLayoutEffect(() => {
     setShowDiff(false);
   }, [focused.sessionId]);
@@ -213,15 +248,31 @@ export function FocusView({
 
         {termError && <div className="term-error">⚠ {termError}</div>}
 
-        {showDiff ? (
-          <>
-            <div className="askdiff-bar">
-              <span>Reviewing working-tree changes</span>
-              <button onClick={() => setShowDiff(false)}>← Back to terminal (Esc)</button>
-            </div>
-            <AskdiffView port={askdiffPort} error={askdiffError} onEscape={() => setShowDiff(false)} />
-          </>
-        ) : (
+        {showDiff && (
+          <div className="askdiff-bar">
+            <span>Reviewing working-tree changes</span>
+            <button onClick={() => setShowDiff(false)}>← Back to terminal (Esc)</button>
+          </div>
+        )}
+        {/* `display: contents` so each pooled session's .askdiff-view becomes
+            a direct flex item of .focus__main, exactly like the single
+            AskdiffView this replaces — only one is ever visible (CSS, not
+            mount state) at a time. */}
+        <div style={{ display: 'contents' }}>
+          {[...askdiffPool.keys()].map((sessionId) => {
+            const state = askdiffState.get(sessionId) ?? { port: null, error: null };
+            return (
+              <AskdiffView
+                key={sessionId}
+                visible={showDiff && sessionId === focused.sessionId}
+                port={state.port}
+                error={state.error}
+                onEscape={() => setShowDiff(false)}
+              />
+            );
+          })}
+        </div>
+        {!showDiff && (
           <TerminalView
             resetKey={termResetKey}
             subscribeTerminal={subscribeTerminal}

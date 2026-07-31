@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import type { AskMessage } from "../protocol/index.js";
+import { createIdleTimeout } from "./util/idleTimeout.js";
+import { ASK_IDLE_TIMEOUT_MS } from "./util/constants.js";
 
 export class ClaudeCliError extends Error {
   constructor(message: string, override readonly cause?: unknown) {
@@ -33,6 +35,22 @@ export async function* streamAnswer(
   };
   params.signal.addEventListener("abort", onAbort);
 
+  // Nothing here previously bounded how long an ask would wait for the next
+  // byte of output — a stalled `claude -p --resume` child (hung CLI,
+  // colliding concurrent `--resume` against a session with a live
+  // interactive process attached, network stall, whatever) left the async
+  // generator's `for await (const chunk of child.stdout)` below waiting
+  // forever, so the WS side never got a `chunk`, `done`, or `error` and the
+  // ask sat in "streaming" state permanently with no feedback. Armed
+  // immediately (covers a child that never writes anything at all) and
+  // touched on every raw stdout chunk, not just successfully parsed lines,
+  // so a slow-but-alive stream never trips it.
+  let timedOut = false;
+  const idleTimeout = createIdleTimeout(ASK_IDLE_TIMEOUT_MS, () => {
+    timedOut = true;
+    if (!child.killed) child.kill("SIGTERM");
+  });
+
   const stderrChunks: string[] = [];
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk: string) => {
@@ -63,6 +81,7 @@ export async function* streamAnswer(
     child.stdout.setEncoding("utf8");
     let buffer = "";
     for await (const chunk of child.stdout) {
+      idleTimeout.touch();
       buffer += chunk as string;
       let newline = buffer.indexOf("\n");
       while (newline >= 0) {
@@ -80,6 +99,11 @@ export async function* streamAnswer(
 
     const { code } = await exitPromise;
     if (params.signal.aborted) return;
+    if (timedOut) {
+      throw new ClaudeCliError(
+        `No response from Claude within ${String(Math.round(ASK_IDLE_TIMEOUT_MS / 1000))}s — the CLI process stalled and was stopped. This can happen if the session has another active process attached (e.g. its terminal). Try again.`,
+      );
+    }
     if (apiError !== null) {
       throw new ClaudeCliError(apiError);
     }
@@ -90,6 +114,7 @@ export async function* streamAnswer(
       );
     }
   } finally {
+    idleTimeout.cancel();
     params.signal.removeEventListener("abort", onAbort);
     if (!child.killed) child.kill("SIGTERM");
   }
