@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import type { AskMessage } from "../protocol/index.js";
 import { createIdleTimeout } from "./util/idleTimeout.js";
 import { ASK_IDLE_TIMEOUT_MS } from "./util/constants.js";
+import { resolveClaudeExecutable } from "../../../src/claudeExecutable.js";
 
 export class ClaudeCliError extends Error {
   constructor(message: string, override readonly cause?: unknown) {
@@ -24,7 +25,7 @@ export async function* streamAnswer(
   const model = params.ask.model ?? process.env["ASKDIFF_MODEL"];
   const args = buildArgs(params.sessionId, model);
 
-  const child = spawn("claude", args, {
+  const child = spawn(resolveClaudeExecutable(), args, {
     cwd: params.cwd,
     stdio: ["pipe", "pipe", "pipe"],
     env: childEnv(),
@@ -34,6 +35,26 @@ export async function* streamAnswer(
     if (!child.killed) child.kill("SIGTERM");
   };
   params.signal.addEventListener("abort", onAbort);
+
+  // spawn() reports failures to launch the process at all (bad executable
+  // path, permissions, …) via an async `error` event, not a thrown
+  // exception — and Node's EventEmitter throws an UNCAUGHT exception if
+  // nothing is listening for `error`, well past this function's own
+  // try/catch below (confirmed live: a bare `spawn("claude", ...)` here
+  // ENOENT'd inside the packaged desktop app, whose process PATH doesn't
+  // resolve the CLI's shim the way a normal terminal does, and it crashed
+  // straight to the daemon's top-level uncaughtException handler — no
+  // `chunk`/`done`/`error` WS message ever went out, so the ask sat in
+  // "streaming" state forever). Listening here converts that into an
+  // ordinary, reportable failure, independent of whatever else the
+  // executable-path fix above already prevents — any other reason spawn
+  // might fail follows this same path instead of taking the daemon's
+  // console down with it.
+  let spawnError: Error | null = null;
+  child.on("error", (err) => {
+    spawnError = err;
+    if (!child.killed) child.kill("SIGTERM");
+  });
 
   // Nothing here previously bounded how long an ask would wait for the next
   // byte of output — a stalled `claude -p --resume` child (hung CLI,
@@ -56,6 +77,13 @@ export async function* streamAnswer(
   child.stderr.on("data", (chunk: string) => {
     stderrChunks.push(chunk);
   });
+  // A process that never actually spawned can also surface the failure as
+  // an `error` on its own stdio streams (e.g. writing to `stdin` below) —
+  // same unhandled-throw hazard as the child's own `error` event above.
+  // The failure itself is already captured there; these just need to not
+  // be silently-unlistened-to.
+  child.stdin.on("error", () => {});
+  child.stderr.on("error", () => {});
 
   const exitPromise = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
     (resolve) => {
@@ -97,8 +125,18 @@ export async function* streamAnswer(
       if (delta !== null) yield delta;
     }
 
-    const { code } = await exitPromise;
     if (params.signal.aborted) return;
+    // Checked before awaiting exitPromise below, not after: a process that
+    // never actually spawned isn't guaranteed to ever emit `close` on every
+    // platform, and this failure is already definitive — no need to wait
+    // on (or risk hanging on) an event that a real process would emit but
+    // this one might not.
+    if (spawnError !== null) {
+      const err: Error = spawnError;
+      throw new ClaudeCliError(`Couldn't start claude: ${err.message}`, err);
+    }
+
+    const { code } = await exitPromise;
     if (timedOut) {
       throw new ClaudeCliError(
         `No response from Claude within ${String(Math.round(ASK_IDLE_TIMEOUT_MS / 1000))}s — the CLI process stalled and was stopped. This can happen if the session has another active process attached (e.g. its terminal). Try again.`,

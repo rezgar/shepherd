@@ -51,6 +51,24 @@ embedded here instead of just shelling out to `npx askdiff`.
      (`util/idleTimeout.ts`, `ASK_IDLE_TIMEOUT_MS` in `util/constants.ts`),
      reset on every stdout chunk, that kills the child and surfaces a clear
      `ClaudeCliError` instead of hanging indefinitely.
+  4. `claude.ts`'s `streamAnswer` spawned a bare `spawn("claude", args, …)`,
+     resolved via the process's PATH. Confirmed live: inside the packaged
+     desktop app this ENOENTs outright (its PATH doesn't include the CLI
+     shim's install directory the way a normal terminal's does), and since
+     spawn failures surface as an async `error` event rather than a thrown
+     exception, an unlistened one is an UNCAUGHT exception that crashes
+     straight past every try/catch here and past `handleAsk`'s own in
+     `server/index.ts`, landing only in the daemon's top-level
+     `uncaughtException` handler — no `chunk`/`done`/`error` WS message
+     ever went out, so the ask sat in "streaming" state forever (the idle
+     timeout above never got a chance to run). Switched to
+     `resolveClaudeExecutable()` (`server/src/claudeExecutable.ts` —
+     shared with `sender.ts`'s interactive-PTY spawns, which never had this
+     problem because they already resolved the real `claude.exe` path
+     directly instead of trusting PATH). Also added `error` listeners on
+     the child process and its `stdin`/`stderr` streams as defense in
+     depth, so any *other* reason spawn might fail surfaces as a normal
+     `ClaudeCliError` instead of an uncaught exception.
 - `ui-dist/` — the **pre-built** static UI bundle (`pnpm run build` output
   from the fork's `packages/ui-browser`), not source. Rebuilding it here
   would mean pulling React 19/Vite/Tailwind v4/react-diff-view/etc. into
