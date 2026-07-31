@@ -97,42 +97,77 @@ function waitForPortOrExit(child, port, timeoutMs) {
   });
 }
 
+/** Opens (creating/truncating as needed) userData/daemon-output.log and
+ *  returns a raw fd for the daemon's stdout+stderr. A raw fd — not a JS
+ *  Stream — is required here: the daemon is spawned `detached` specifically
+ *  so it outlives this Electron process (including the case where THIS
+ *  process crashes, confirmed to happen under exactly the load this is
+ *  meant to help diagnose), and only a raw OS-level fd keeps receiving the
+ *  child's writes once nothing on the Node/JS side is left running to pump
+ *  a Stream. Previously this was `stdio: 'ignore'`, which meant every
+ *  uncaught exception, chokidar error, and crash reason the daemon ever hit
+ *  was silently discarded — undiagnosable without literally reproducing it
+ *  under a manual, foreground run. */
+function openDaemonLogFd() {
+  const logPath = path.join(app.getPath('userData'), 'daemon-output.log');
+  try {
+    const { size } = fs.existsSync(logPath) ? fs.statSync(logPath) : { size: 0 };
+    if (size > LOG_MAX_BYTES) fs.writeFileSync(logPath, '--- log truncated ---\n');
+  } catch {
+    /* best-effort — falls through to opening (and likely creating) the file below */
+  }
+  try {
+    fs.appendFileSync(logPath, `\n--- daemon spawn ${new Date().toISOString()} ---\n`);
+  } catch {
+    /* best-effort */
+  }
+  return fs.openSync(logPath, 'a');
+}
+
 /** Start the daemon detached so it outlives this app. Returns the child so
  *  callers can race port-up against an early crash instead of only polling. */
 function startDaemon() {
   let child;
-  if (app.isPackaged) {
-    // Run the bundled daemon with Electron's own Node runtime — no system Node
-    // required. It ships as real files under resources/daemon (not asar) so its
-    // native node-pty resolves from a sibling node_modules at runtime.
-    const daemonDir = path.join(process.resourcesPath, 'daemon');
-    const daemonEntry = path.join(daemonDir, 'daemon.cjs');
-    log('[desktop] starting bundled daemon:', daemonEntry);
-    child = spawn(process.execPath, [daemonEntry], {
-      cwd: daemonDir,
-      // SHEPHERD_VERSION stamps the daemon with the app version that spawned it,
-      // so a later app launch can tell (via GET /version) whether this daemon is
-      // stale after an update and must be recycled — see ensureDaemon.
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SHEPHERD_VERSION: app.getVersion() },
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-    });
-  } else {
-    // Dev: launch the daemon via the repo script (plain-Node tsx).
-    log('[desktop] starting dev daemon: pnpm dev:server');
-    child = spawn('pnpm', ['--filter', '@shepherd/server', 'dev'], {
-      cwd: REPO_ROOT,
-      env: { ...process.env, SHEPHERD_VERSION: app.getVersion() },
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-      shell: process.platform === 'win32',
-    });
+  const daemonLogFd = openDaemonLogFd();
+  try {
+    if (app.isPackaged) {
+      // Run the bundled daemon with Electron's own Node runtime — no system Node
+      // required. It ships as real files under resources/daemon (not asar) so its
+      // native node-pty resolves from a sibling node_modules at runtime.
+      const daemonDir = path.join(process.resourcesPath, 'daemon');
+      const daemonEntry = path.join(daemonDir, 'daemon.cjs');
+      log('[desktop] starting bundled daemon:', daemonEntry);
+      child = spawn(process.execPath, [daemonEntry], {
+        cwd: daemonDir,
+        // SHEPHERD_VERSION stamps the daemon with the app version that spawned it,
+        // so a later app launch can tell (via GET /version) whether this daemon is
+        // stale after an update and must be recycled — see ensureDaemon.
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SHEPHERD_VERSION: app.getVersion() },
+        detached: true,
+        stdio: ['ignore', daemonLogFd, daemonLogFd],
+        windowsHide: true,
+      });
+    } else {
+      // Dev: launch the daemon via the repo script (plain-Node tsx).
+      log('[desktop] starting dev daemon: pnpm dev:server');
+      child = spawn('pnpm', ['--filter', '@shepherd/server', 'dev'], {
+        cwd: REPO_ROOT,
+        env: { ...process.env, SHEPHERD_VERSION: app.getVersion() },
+        detached: true,
+        stdio: ['ignore', daemonLogFd, daemonLogFd],
+        windowsHide: true,
+        shell: process.platform === 'win32',
+      });
+    }
+  } finally {
+    // The child (via CreateProcess/fork) has its own duplicated handle to
+    // the same file by now — safe to close our copy immediately rather than
+    // hold it open for this long-lived process's whole lifetime.
+    fs.closeSync(daemonLogFd);
   }
   child.on('error', (e) => log('[desktop] daemon failed to spawn:', e.message));
   child.on('exit', (code, signal) => {
-    if (code !== 0) log(`[desktop] daemon exited early (code=${code}, signal=${signal})`);
+    if (code !== 0) log(`[desktop] daemon exited early (code=${code}, signal=${signal}) — see daemon-output.log`);
   });
   child.unref();
   return child;

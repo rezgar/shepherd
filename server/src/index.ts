@@ -537,6 +537,14 @@ async function main() {
   // the session file itself) is watched too, for live subagent-modal updates.
   const watcher = chokidar.watch(PROJECTS_DIR, { ignoreInitial: true, depth: 3 });
   watcher.on('add', onEvt).on('change', onEvt).on('unlink', onEvt);
+  // An EventEmitter's 'error' event throws synchronously if nothing's
+  // listening for it — the top-level uncaughtException handler above would
+  // still catch that, but only as an opaque "uncaught exception" with no
+  // hint this watcher was the source. Logging it here directly is the
+  // difference between a diagnosable message and a mystery crash.
+  watcher.on('error', (err) => {
+    console.error('[shepherd] projects watcher error:', err);
+  });
 
   setInterval(async () => {
     current = await buildSnapshot();
