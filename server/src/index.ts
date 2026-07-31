@@ -551,6 +551,33 @@ async function main() {
     broadcast();
   }, 15_000);
 
+  // TEMPORARY diagnostic for an unexplained runaway leak (confirmed live:
+  // 1M+ handles / 10+ GB RSS within seconds in one occurrence, a slower
+  // ~linear climb to hundreds of thousands of handles over tens of minutes
+  // in another — and NOTHING else logged during either, ruling out a loud
+  // retry loop). `process._getActiveHandles()` is undocumented but stable
+  // and exactly the right tool here: grouping by constructor name says
+  // WHICH kind of handle is accumulating (sockets? FSWatchers? child
+  // processes? timers?) instead of just watching the total climb, which is
+  // all OS-level process metrics can tell us. Remove once the leak is
+  // actually identified and fixed.
+  setInterval(() => {
+    const handles = (process as unknown as { _getActiveHandles?: () => unknown[] })._getActiveHandles?.() ?? [];
+    const counts = new Map<string, number>();
+    for (const h of handles) {
+      const name = (h as { constructor?: { name?: string } })?.constructor?.name ?? typeof h;
+      counts.set(name, (counts.get(name) ?? 0) + 1);
+    }
+    const breakdown = [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, v]) => `${k}=${String(v)}`)
+      .join(' ');
+    const mem = process.memoryUsage();
+    console.log(
+      `[shepherd] diag: handles=${String(handles.length)} (${breakdown}) heapUsed=${String(Math.round(mem.heapUsed / 1e6))}MB rss=${String(Math.round(mem.rss / 1e6))}MB`,
+    );
+  }, 20_000).unref();
+
   // Keeps the top-bar lines-changed count live while a session stays
   // focused, independent of both the transcript watcher above (a
   // different filesystem tree — ~/.claude/projects, not the session's own
