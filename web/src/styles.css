@@ -469,6 +469,14 @@ body {
   -webkit-line-clamp: 1;
   font-size: 10px;
 }
+.card--icon-only {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
 
 /* ---- focus view ---- */
 .focus-shell {
@@ -857,6 +865,15 @@ body {
   width: 200px;
   height: 100vh;
 }
+/* Collapsed while the askdiff panel is open (#115) — still clickable for
+   switching sessions, just narrow enough to give the diff panel most of
+   the width back. Per-card and per-tab sizing lives in .card--icon-only /
+   here, not duplicated per element. */
+.strip--icon-only {
+  flex: 0 0 46px;
+  width: 46px;
+  padding: 10px 8px;
+}
 .strip__group {
   flex: 0 0 auto;
 }
@@ -867,6 +884,13 @@ body {
   padding: 3px 10px;
   border-radius: 7px 7px 0 0;
   cursor: grab;
+}
+.strip--icon-only .strip__tab {
+  padding: 3px 6px;
+  text-align: center;
+}
+.strip--icon-only .strip__cards {
+  padding: 6px 4px;
 }
 .strip__tab:active {
   cursor: grabbing;

@@ -13,6 +13,7 @@ export function AgentCard({
   agent,
   now,
   compact,
+  iconOnly,
   selected,
   onClick,
   displayName,
@@ -21,6 +22,13 @@ export function AgentCard({
   agent: AgentModel;
   now: number;
   compact?: boolean;
+  /** Collapses the card to just its state dot/spinner (+ error/needs-you
+   *  badge) — used by CardStrip while the askdiff panel is open, so the
+   *  strip stays clickable for switching sessions (preserving each
+   *  session's diff-open state, see FocusView's pool) without costing the
+   *  diff panel much width. Name/stage/status move into a `title` tooltip
+   *  on the card itself since there's no room to show them. */
+  iconOnly?: boolean;
   selected?: boolean;
   onClick?: () => void;
   displayName?: string;
@@ -45,11 +53,28 @@ export function AgentCard({
     working && 'card--working',
     agent.state === 'idle' && 'card--idle',
     compact && 'card--compact',
+    iconOnly && 'card--icon-only',
     selected && 'card--selected',
     onClick && 'card--clickable',
   ]
     .filter(Boolean)
     .join(' ');
+
+  if (iconOnly) {
+    return (
+      <div className={cls} onClick={onClick} title={`${name}\n${agent.label} · ${agent.cwd}\n${statusText}`}>
+        {errored && <span className="badge badge--error">⚠</span>}
+        {needs && <span className="badge">!</span>}
+        {working ? (
+          <span className="spin" aria-label="working">
+            {glyph}
+          </span>
+        ) : (
+          <span className="dot" style={{ background: STATE_DOT[agent.state] }} />
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className={cls} onClick={onClick}>
