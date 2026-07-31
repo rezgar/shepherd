@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { AgentModel, ChatMsg, Limits, SubagentInfo } from '../types';
 import { CardStrip } from './CardStrip';
 import type { StripState } from '../lib/order';
@@ -76,9 +76,25 @@ export function FocusView({
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
-  const [showDiff, setShowDiff] = useState(false);
   const name = nameOf(focused);
   const focusRootRef = useRef<HTMLDivElement>(null);
+
+  // Which sessions currently have their diff panel open — per-session, not
+  // a single flag, so switching cards no longer forces you back to the
+  // terminal: a session you left with the panel open shows it open again
+  // when you return, the same way its Q&A history (via the pool below)
+  // already does.
+  const [openDiffSessions, setOpenDiffSessions] = useState<Set<string>>(() => new Set());
+  const showDiff = openDiffSessions.has(focused.sessionId);
+  const setDiffOpen = (sessionId: string, open: boolean) => {
+    setOpenDiffSessions((prev) => {
+      if (prev.has(sessionId) === open) return prev;
+      const next = new Set(prev);
+      if (open) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  };
 
   // Sessions whose askdiff iframe this FocusView instance is keeping warm —
   // each stays mounted (just hidden) once added, so its in-memory Q&A store
@@ -117,20 +133,6 @@ export function FocusView({
     });
   }, [showDiff, focused.sessionId]);
 
-  // Always land back on the terminal when switching sessions — whether the
-  // diff panel happens to be open is UI state, not something that should
-  // follow you to a different card (the Q&A *history* underneath it does
-  // persist per-session via the pool above; this is only about which panel
-  // is showing). `useLayoutEffect`, not `useEffect`: a passive effect would
-  // run after the switch's own commit already painted, showing one visible
-  // frame with the new session's `focused.sessionId` but the old
-  // `showDiff`/pool state (either the wrong-looking "diff view followed
-  // you" flash, or a blank slot if the new session has no pool entry yet).
-  // The layout-effect timing (synchronous, pre-paint) closes that gap.
-  useLayoutEffect(() => {
-    setShowDiff(false);
-  }, [focused.sessionId]);
-
   // Detach on unmount / session switch / opening the diff view (which takes
   // over the terminal's own slot in focus__main below). Attach is driven by
   // TerminalView instead (via onAttach below): it must happen only once the
@@ -163,11 +165,11 @@ export function FocusView({
       if (e.key !== 'Escape') return;
       e.preventDefault();
       if (subagentModal) onCloseSubagent();
-      else setShowDiff(false);
+      else setDiffOpen(focused.sessionId, false);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [subagentModal, showDiff, onCloseSubagent]);
+  }, [subagentModal, showDiff, onCloseSubagent, focused.sessionId]);
 
   const startEdit = () => {
     setDraft(name);
@@ -231,7 +233,7 @@ export function FocusView({
             {linesChanged && (linesChanged.added > 0 || linesChanged.removed > 0) && (
               <button
                 className="lines-changed"
-                onClick={() => setShowDiff(true)}
+                onClick={() => setDiffOpen(focused.sessionId, true)}
                 title="Review working-tree changes"
               >
                 <span className="lines-changed__added">+{linesChanged.added}</span>
@@ -239,7 +241,7 @@ export function FocusView({
               </button>
             )}
             <LimitsTracker limits={limits} />
-            <span className="fontctl" title="Terminal font size">
+            <span className="fontctl" title="Font size (terminal and diff panel)">
               <button onClick={() => onFontSize(-1)}>A−</button>
               <button onClick={() => onFontSize(1)}>A+</button>
             </span>
@@ -251,7 +253,7 @@ export function FocusView({
         {showDiff && (
           <div className="askdiff-bar">
             <span>Reviewing working-tree changes</span>
-            <button onClick={() => setShowDiff(false)}>← Back to terminal (Esc)</button>
+            <button onClick={() => setDiffOpen(focused.sessionId, false)}>← Back to terminal (Esc)</button>
           </div>
         )}
         {/* `display: contents` so each pooled session's .askdiff-view becomes
@@ -267,7 +269,8 @@ export function FocusView({
                 visible={showDiff && sessionId === focused.sessionId}
                 port={state.port}
                 error={state.error}
-                onEscape={() => setShowDiff(false)}
+                fontSize={fontSize}
+                onEscape={() => setDiffOpen(focused.sessionId, false)}
               />
             );
           })}
