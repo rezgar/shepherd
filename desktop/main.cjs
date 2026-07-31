@@ -17,15 +17,40 @@ const { spawn, execSync } = require('node:child_process');
 const net = require('node:net');
 const http = require('node:http');
 const path = require('node:path');
+const fs = require('node:fs');
 
 const DAEMON_PORT = 4177; // ws daemon (server/src/index.ts)
+const CONTROL_PORT = 4178; // this process's own restart-daemon endpoint (see startControlServer)
 const WEB_PORT = 5173; // vite dev server (dev mode only)
 const REPO_ROOT = path.resolve(__dirname, '..');
 /** How often the packaged app checks GitHub Releases for a newer build. The
  *  first check fires one interval AFTER launch (never at startup). */
 const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+/** Bound on how many times ensureDaemon retries a spawn that never bound the
+ *  port (crashed instantly, or a wedged predecessor holding it hostage). */
+const MAX_START_ATTEMPTS = 3;
+const START_ATTEMPT_TIMEOUT_MS = 12_000;
+const LOG_MAX_BYTES = 2 * 1024 * 1024;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Append a timestamped line to userData/shepherd.log AND stdout. This is the
+ *  only record of daemon lifecycle events in a packaged build (stdio is
+ *  'ignore' on the child, and there's no console to read console.log from),
+ *  so anything that can explain "the daemon never came up" belongs here. */
+function log(...args) {
+  const line = `[${new Date().toISOString()}] ${args.join(' ')}`;
+  console.log(line);
+  try {
+    const logPath = path.join(app.getPath('userData'), 'shepherd.log');
+    const { size } = fs.existsSync(logPath) ? fs.statSync(logPath) : { size: 0 };
+    fs.appendFileSync(logPath, (size > LOG_MAX_BYTES ? '--- log truncated ---\n' : '') + line + '\n', {
+      flag: size > LOG_MAX_BYTES ? 'w' : 'a',
+    });
+  } catch {
+    /* best-effort — a logging failure must never block daemon startup */
+  }
+}
 
 /** Resolve true when a TCP connect to localhost:port succeeds. */
 function isPortUp(port) {
@@ -52,16 +77,38 @@ async function waitForPort(port, timeoutMs = 30_000) {
   return false;
 }
 
-/** Start the daemon detached so it outlives this app. */
+/** Like waitForPort, but also bails out early if `child` exits with a
+ *  non-zero code first — no point polling for the rest of timeoutMs when the
+ *  process that was supposed to bind the port already died. */
+function waitForPortOrExit(child, port, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      child.removeListener('exit', onExit);
+      resolve(result);
+    };
+    const onExit = (code) => {
+      if (code !== 0) finish(false);
+    };
+    child.on('exit', onExit);
+    waitForPort(port, timeoutMs).then(finish);
+  });
+}
+
+/** Start the daemon detached so it outlives this app. Returns the child so
+ *  callers can race port-up against an early crash instead of only polling. */
 function startDaemon() {
+  let child;
   if (app.isPackaged) {
     // Run the bundled daemon with Electron's own Node runtime — no system Node
     // required. It ships as real files under resources/daemon (not asar) so its
     // native node-pty resolves from a sibling node_modules at runtime.
     const daemonDir = path.join(process.resourcesPath, 'daemon');
     const daemonEntry = path.join(daemonDir, 'daemon.cjs');
-    console.log('[desktop] starting bundled daemon:', daemonEntry);
-    const child = spawn(process.execPath, [daemonEntry], {
+    log('[desktop] starting bundled daemon:', daemonEntry);
+    child = spawn(process.execPath, [daemonEntry], {
       cwd: daemonDir,
       // SHEPHERD_VERSION stamps the daemon with the app version that spawned it,
       // so a later app launch can tell (via GET /version) whether this daemon is
@@ -71,12 +118,10 @@ function startDaemon() {
       stdio: 'ignore',
       windowsHide: true,
     });
-    child.on('error', (e) => console.error('[desktop] daemon failed to start:', e.message));
-    child.unref();
   } else {
     // Dev: launch the daemon via the repo script (plain-Node tsx).
-    console.log('[desktop] starting dev daemon: pnpm dev:server');
-    const child = spawn('pnpm', ['--filter', '@shepherd/server', 'dev'], {
+    log('[desktop] starting dev daemon: pnpm dev:server');
+    child = spawn('pnpm', ['--filter', '@shepherd/server', 'dev'], {
       cwd: REPO_ROOT,
       env: { ...process.env, SHEPHERD_VERSION: app.getVersion() },
       detached: true,
@@ -84,9 +129,13 @@ function startDaemon() {
       windowsHide: true,
       shell: process.platform === 'win32',
     });
-    child.on('error', (e) => console.error('[desktop] dev daemon failed to start:', e.message));
-    child.unref();
   }
+  child.on('error', (e) => log('[desktop] daemon failed to spawn:', e.message));
+  child.on('exit', (code, signal) => {
+    if (code !== 0) log(`[desktop] daemon exited early (code=${code}, signal=${signal})`);
+  });
+  child.unref();
+  return child;
 }
 
 /** Dev only: ensure the vite dev server is up (the packaged app loads from disk). */
@@ -152,27 +201,43 @@ function daemonVersion() {
   });
 }
 
-/** Windows only: force-kill whatever process tree is listening on `port`. The
- *  graceful path is POST /shutdown; this is the fallback for a daemon that
- *  predates the endpoint (the first update into this feature) or is wedged. */
+/** Force-kill whatever process tree is listening on `port`, regardless of
+ *  whose it is or what version it's running — the graceful path is POST
+ *  /shutdown; this is the fallback for a daemon that predates the endpoint,
+ *  is wedged, or is a stray/duplicate instance left over from a crash or a
+ *  race with another Shepherd launch. */
 function killByPort(port) {
-  if (process.platform !== 'win32') return;
   try {
-    const out = execSync(`netstat -ano -p tcp | findstr :${port}`, { encoding: 'utf8' });
-    const pids = new Set();
-    for (const line of out.split(/\r?\n/)) {
-      const m = line.trim().match(/LISTENING\s+(\d+)\s*$/);
-      if (m) pids.add(m[1]);
-    }
-    for (const pid of pids) {
-      try {
-        execSync(`taskkill /F /T /PID ${pid}`); // /T: take the claude children with it
-      } catch {
-        /* already gone */
+    if (process.platform === 'win32') {
+      const out = execSync(`netstat -ano -p tcp | findstr :${port}`, { encoding: 'utf8' });
+      const pids = new Set();
+      for (const line of out.split(/\r?\n/)) {
+        const m = line.trim().match(/LISTENING\s+(\d+)\s*$/);
+        if (m) pids.add(m[1]);
+      }
+      for (const pid of pids) {
+        try {
+          execSync(`taskkill /F /T /PID ${pid}`); // /T: take the claude children with it
+          log(`[desktop] killed stale process on :${port} (pid ${pid})`);
+        } catch {
+          /* already gone */
+        }
+      }
+    } else {
+      const out = execSync(`lsof -ti tcp:${port} -sTCP:LISTEN`, { encoding: 'utf8' });
+      for (const pid of out.split(/\s+/).filter(Boolean)) {
+        try {
+          execSync(`kill -9 ${pid}`);
+          log(`[desktop] killed stale process on :${port} (pid ${pid})`);
+        } catch {
+          /* already gone */
+        }
       }
     }
   } catch (e) {
-    console.error('[desktop] killByPort failed:', e?.message ?? e);
+    // Both netstat/findstr and lsof exit with status 1 when nothing matches —
+    // that's the common "nothing to kill" case, not a real failure worth logging.
+    if (e?.status !== 1) log('[desktop] killByPort failed:', e?.message ?? e);
   }
 }
 
@@ -205,6 +270,11 @@ async function stopDaemon() {
   }
 }
 
+/** Bring up a daemon this app owns: reuse a current-version one already
+ *  running, recycle anything stale or unversioned, and if starting a fresh
+ *  one doesn't pan out (crashes instantly, or leaves a wedged process
+ *  squatting the port), kill whatever's there and retry rather than leaving
+ *  the UI stuck on "waiting" forever with nothing to explain why. */
 async function ensureDaemon() {
   if (await isPortUp(DAEMON_PORT)) {
     const running = await daemonVersion();
@@ -214,14 +284,67 @@ async function ensureDaemon() {
     // actually land). A daemon that doesn't report a version (null) predates
     // this feature and is always recycled.
     if (running !== null && !isOlderVersion(running, app.getVersion())) {
-      console.log(`[desktop] daemon v${running} on ${DAEMON_PORT} is current — reusing it`);
+      log(`[desktop] daemon v${running} on ${DAEMON_PORT} is current — reusing it`);
       return;
     }
-    console.log(`[desktop] daemon (${running ?? 'unversioned'}) is stale vs app v${app.getVersion()} — recycling`);
+    log(`[desktop] daemon (${running ?? 'unversioned'}) is stale vs app v${app.getVersion()} — recycling`);
     await stopDaemon();
   }
-  startDaemon();
-  await waitForPort(DAEMON_PORT);
+
+  for (let attempt = 1; attempt <= MAX_START_ATTEMPTS; attempt++) {
+    log(`[desktop] starting daemon — attempt ${attempt}/${MAX_START_ATTEMPTS}`);
+    const child = startDaemon();
+    if (await waitForPortOrExit(child, DAEMON_PORT, START_ATTEMPT_TIMEOUT_MS)) {
+      log(`[desktop] daemon is up on :${DAEMON_PORT}`);
+      return;
+    }
+    log(`[desktop] attempt ${attempt} did not bring the daemon up — clearing :${DAEMON_PORT} and retrying`);
+    killByPort(DAEMON_PORT);
+    await sleep(500 * attempt);
+  }
+  log(`[desktop] daemon failed to start after ${MAX_START_ATTEMPTS} attempts — giving up (see shepherd.log; try Restart daemon)`);
+}
+
+/** Unconditional recycle for the "Restart daemon" button: stop whatever's on
+ *  the port (if anything) and start fresh, regardless of version. */
+async function forceRestartDaemon() {
+  if (await isPortUp(DAEMON_PORT)) await stopDaemon();
+  for (let attempt = 1; attempt <= MAX_START_ATTEMPTS; attempt++) {
+    const child = startDaemon();
+    if (await waitForPortOrExit(child, DAEMON_PORT, START_ATTEMPT_TIMEOUT_MS)) return true;
+    killByPort(DAEMON_PORT);
+    await sleep(500 * attempt);
+  }
+  return false;
+}
+
+/** Serve the same `POST /restart-daemon` control endpoint the web UI's
+ *  "Restart daemon" button already calls (hardcoded to :4178) — previously
+ *  only `scripts/serve.mjs`'s dev-only supervisor answered on that port, so
+ *  the button was dead in every Electron build (dev and packaged). Binding
+ *  it here makes it actually work everywhere the button is shown. */
+function startControlServer() {
+  const server = http.createServer((req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'content-type');
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204).end();
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/restart-daemon') {
+      log('[desktop] restart requested via control endpoint');
+      forceRestartDaemon().then((ok) => {
+        res
+          .writeHead(ok ? 200 : 500, { 'content-type': 'application/json' })
+          .end(JSON.stringify(ok ? { ok: true } : { ok: false, error: 'daemon did not come back up — see shepherd.log' }));
+      });
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  server.on('error', (e) => log('[desktop] control server failed to start:', e?.message ?? e));
+  server.listen(CONTROL_PORT, () => log(`[desktop] control endpoint on :${CONTROL_PORT}`));
 }
 
 async function loadUI(win) {
@@ -405,18 +528,37 @@ function buildMenu() {
   return Menu.buildFromTemplate(template);
 }
 
-app.whenReady().then(async () => {
-  Menu.setApplicationMenu(buildMenu());
-  await ensureDaemon();
-  await createWindow();
-  startUpdateChecks();
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+// Only one Shepherd instance may drive daemon startup at a time — without
+// this, a double-launch (impatient double-click, a relaunch racing a still-
+// starting instance) spawns two ensureDaemon() runs that fight over the same
+// port, and one side's spawn losing to EADDRINUSE looks identical to "the
+// daemon never starts". A second launch just focuses the existing window.
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (win) {
+      if (win.isMinimized()) win.restore();
+      win.focus();
+    }
   });
-});
 
-// Closing the app must NOT stop the daemon — it's a shared, detached service
-// (keeps browser clients and live session PTYs alive).
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
+  app.whenReady().then(async () => {
+    Menu.setApplicationMenu(buildMenu());
+    startControlServer();
+    await ensureDaemon();
+    await createWindow();
+    startUpdateChecks();
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
+
+  // Closing the app must NOT stop the daemon — it's a shared, detached service
+  // (keeps browser clients and live session PTYs alive).
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+  });
+}
