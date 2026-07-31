@@ -12,18 +12,21 @@ import { resolveDiffBase } from './diffStat.js';
 const IDLE_EVICT_MS = 10 * 60_000;
 const EVICT_SWEEP_MS = 5 * 60_000;
 
-// Instances are keyed by sessionId, not cwd — two sessions in the same
-// project each get their own independent chokidar watcher + working-tree
-// diff computation over the identical directory, reacting to the identical
-// file-change events. That's pure waste, but collapsing it properly means
-// sharing the watcher/diff while keeping askdiff's per-session "Ask" bridge
-// (a `claude --resume <thatSession>` conversation) intact — a real
-// restructuring of the vendored server, not a quick fix. This cap is the
-// safe stopgap: however many sessions get focused, no more than this many
-// redundant watchers are ever alive at once. Confirmed live: an unbounded
-// count of these compounding (each with its own uncapped git-subprocess
-// fanout, see working-tree-diff.ts) ran a daemon to 1M+ handles and 10+ GB
-// RSS within seconds of opening a second session in an already-open project.
+// Instances are keyed by sessionId with no ceiling on how many can be live
+// at once. Each one is a fully independent chokidar watcher + working-tree
+// diff computation — usually over a distinct worktree, not shared work, so
+// there's nothing to de-dupe here — but every one of them runs through this
+// same single-threaded daemon, and each has its own (previously uncapped)
+// git-subprocess fanout on every file change (see working-tree-diff.ts).
+// Confirmed live: enough of these alive at once, each fanning out
+// unbounded, ran the daemon to 1M+ handles and 10+ GB RSS within seconds of
+// opening a second session in an already-open project. Sizing this cap by
+// making the watcher shared/ref-counted per project would need
+// restructuring the vendored server (its per-session `claude --resume` Ask
+// bridge is tangled with the watcher) — a real fix, not a quick one. This
+// cap is the safe stopgap: no more than this many of these expensive
+// instances are ever alive at once, regardless of how many sessions get
+// focused.
 const MAX_CONCURRENT_INSTANCES = 4;
 
 interface AskdiffInstance {
