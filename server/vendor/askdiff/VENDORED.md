@@ -14,15 +14,33 @@ embedded here instead of just shelling out to `npx askdiff`.
   Q&A bridge, diff parsing/staleness/working-tree-capture/watch utilities).
   Relative imports rewritten from the `@askdiff/protocol` package specifier
   to plain relative paths, and given `.js` extensions to match this repo's
-  own import convention. One further deliberate change: `util/working-tree-diff.ts`'s
-  untracked-file diffing fanned every untracked file out via a single
-  unbounded `Promise.all`, spawning one `git` subprocess per file
-  simultaneously with no cap. Fine for a one-shot CLI diff, but this runs on
-  every filesystem-event refresh of a live (`volatile`) working-tree
-  session — confirmed live to run Shepherd's daemon to 1M+ handles and
-  10+ GB RSS within seconds, once a project had any real number of
-  untracked files plus ambient file churn. Capped to a small (8) worker
-  pool instead of the unbounded fan-out.
+  own import convention. Two further deliberate changes:
+  1. `util/working-tree-diff.ts`'s untracked-file diffing fanned every
+     untracked file out via a single unbounded `Promise.all`, spawning one
+     `git` subprocess per file simultaneously with no cap. Fine for a
+     one-shot CLI diff, but this runs on every filesystem-event refresh of
+     a live (`volatile`) working-tree session — confirmed live to run
+     Shepherd's daemon to 1M+ handles and 10+ GB RSS within seconds, once a
+     project had any real number of untracked files plus ambient file
+     churn. Capped to a small (8) worker pool instead of the unbounded
+     fan-out.
+  2. `util/watch.ts`'s working-tree watcher passed `ignored: ['**/.git/**',
+     '**/node_modules/**']` — glob strings, which chokidar 4 silently does
+     NOT support (its own README: "v4: remove glob support"; a string
+     matcher there is a plain `===` equality check, never true for a real
+     path). This exclusion had never actually worked, at any point — it
+     just never mattered until a repo was large/gitignore-heavy enough to
+     notice. Confirmed live: a repo using a `.worktrees/` convention (each
+     entry a FULL nested checkout, its own `node_modules` included) sent
+     this watcher's native handle count into the hundreds of thousands and
+     crashed the daemon, with `.git`/`node_modules`/`.worktrees` all fully
+     recursed into despite the (non-functional) exclusion list. Replaced
+     with a real function matcher: always excludes any path segment named
+     `.git` or `node_modules`, plus whatever `git ls-files --others
+     --ignored --exclude-standard --directory` reports for the target repo
+     (resolved once at watch setup). This changed `watchWorkingTree`'s
+     signature from sync to async (`server/index.ts`'s one call site now
+     awaits it).
 - `ui-dist/` — the **pre-built** static UI bundle (`pnpm run build` output
   from the fork's `packages/ui-browser`), not source. Rebuilding it here
   would mean pulling React 19/Vite/Tailwind v4/react-diff-view/etc. into
