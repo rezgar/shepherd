@@ -239,7 +239,7 @@ export async function startServer(opts: StartServerOptions): Promise<ServerHandl
         }
       })();
     };
-    workingTreeWatcher = watchWorkingTree(state.cwd, runRefresh);
+    workingTreeWatcher = await watchWorkingTree(state.cwd, runRefresh);
   }
 
   wss.on("connection", (ws) => {
