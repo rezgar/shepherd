@@ -63,9 +63,15 @@ import { createInlineArtifactLayer } from '../lib/inlineArtifacts';
  *  corrupted — words fused, lines misaligned (#31/#45) — and the only reliable
  *  fix was a racy ±1-column resize "nudge" to force a full CLI repaint. With a
  *  width-matched snapshot there is nothing to reflow, so the nudge is gone.
- *  `onFirstChunk` now only pins the viewport to the bottom when the snapshot
- *  lands, so the CLI's bottom-anchored input box is visible rather than
- *  scrolled off below the fold. */
+ *  The first chunk's write callback pins the viewport to the bottom once the
+ *  snapshot lands (so the CLI's bottom-anchored input box is visible), then
+ *  scrolls back up by
+ *  `initialScrollLinesFromBottom` if the caller passed one — restoring
+ *  roughly where you'd scrolled to before this session was last torn down,
+ *  instead of always stranding you at the bottom on every switch back. The
+ *  server's snapshot already carries up to 1000 lines of scrollback
+ *  (`SessionScreen`), so the content to scroll back into is there — only the
+ *  client was discarding where you'd left off. */
 export function TerminalView({
   resetKey,
   subscribeTerminal,
@@ -75,6 +81,8 @@ export function TerminalView({
   onInput,
   active,
   resolveImageSrc,
+  initialScrollLinesFromBottom,
+  onDetachScroll,
 }: {
   resetKey: string;
   subscribeTerminal: (onChunk: (chunk: string) => void) => () => void;
@@ -93,6 +101,15 @@ export function TerminalView({
   /** Maps an image path (from a Write/Read tool block) to a loadable URL, so the
    *  inline-artifact layer can render images inline. */
   resolveImageSrc?: (path: string) => string | null;
+  /** How many lines above the bottom this session was scrolled to when it was
+   *  last detached — read once, when the first chunk (the snapshot) lands.
+   *  0 or omitted scrolls to the bottom, same as before this existed. */
+  initialScrollLinesFromBottom?: number;
+  /** Called with this session's id (== `resetKey`) and its current scroll
+   *  offset right before the terminal is torn down (switching away, or
+   *  unmounting) — the caller is expected to remember it per session and
+   *  feed it back as `initialScrollLinesFromBottom` on the next attach. */
+  onDetachScroll?: (sessionId: string, linesFromBottom: number) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -111,6 +128,10 @@ export function TerminalView({
   activeRef.current = active;
   const resolveImageSrcRef = useRef(resolveImageSrc);
   resolveImageSrcRef.current = resolveImageSrc;
+  const initialScrollRef = useRef(initialScrollLinesFromBottom);
+  initialScrollRef.current = initialScrollLinesFromBottom;
+  const onDetachScrollRef = useRef(onDetachScroll);
+  onDetachScrollRef.current = onDetachScroll;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -201,14 +222,28 @@ export function TerminalView({
     // Subscribe FIRST, then attach — so no output the attach triggers can slip
     // in before we're listening. On the first chunk (the server's width-matched
     // snapshot), pin the viewport to the bottom so the CLI's bottom-anchored
-    // input box is on-screen, not scrolled off below the fold.
-    let onFirstChunk: (() => void) | null = () => {
-      onFirstChunk = null;
-      term.scrollToBottom();
-    };
+    // input box is on-screen, not scrolled off below the fold — then, if this
+    // session was scrolled up when it was last detached, scroll back up by
+    // that same amount, so switching back doesn't always strand you at the
+    // bottom of whatever you'd scrolled away from reading. This must run in
+    // `write`'s OWN completion callback, not just-after calling it: `write`
+    // parses asynchronously (same reason SessionScreen's own flush() exists
+    // server-side), so reading/moving the viewport synchronously after the
+    // call sees the buffer from BEFORE this chunk was actually applied —
+    // confirmed live: the restore ran against an still-empty buffer, then
+    // the snapshot's own auto-follow-while-writing behavior carried the
+    // viewport right back to the bottom anyway as it filled in afterward.
+    let isFirstChunk = true;
     const unsubscribe = subscribeRef.current((chunk) => {
-      term.write(chunk);
-      onFirstChunk?.();
+      const onWritten = isFirstChunk
+        ? () => {
+            term.scrollToBottom();
+            const restore = initialScrollRef.current;
+            if (restore) term.scrollLines(-restore);
+          }
+        : undefined;
+      isFirstChunk = false;
+      term.write(chunk, onWritten);
       scheduleScan();
     });
 
@@ -224,8 +259,23 @@ export function TerminalView({
     // and the CLI repaints at the new size; the client is already fit to it, so
     // there's nothing to reflow. Pin to the bottom afterwards so the input line
     // stays visible across the resize.
+    //
+    // `observe()` always fires once immediately with the size the container
+    // already has — not a genuine resize, just the browser's first report.
+    // Skipped here: `fit()` already ran synchronously above and `onAttach`
+    // already sent that size, so re-running them is redundant, and this
+    // redundant firing was the one that mattered — its unconditional
+    // `scrollToBottom()` landed AFTER `onFirstChunk`'s scroll-restore above
+    // (confirmed live: scrolled up, switched sessions and back, landed at
+    // the bottom anyway — this is why), silently undoing it on every single
+    // attach, restored or not.
+    let sawFirstResize = false;
     let settleTimer: ReturnType<typeof setTimeout> | undefined;
     const ro = new ResizeObserver(() => {
+      if (!sawFirstResize) {
+        sawFirstResize = true;
+        return;
+      }
       clearTimeout(settleTimer);
       settleTimer = setTimeout(() => {
         fit.fit();
@@ -240,6 +290,14 @@ export function TerminalView({
       clearTimeout(scanTimer);
       unsubscribe();
       ro.disconnect();
+      // Remember how far above the bottom this session was scrolled — before
+      // disposing, which resets the buffer these offsets are relative to.
+      // `resetKey` is this session's id (see api.ts's focus()), captured by
+      // this effect instance's own closure, so it's still the LEAVING
+      // session's id here even though the prop may have already moved on to
+      // the next one by the time this cleanup runs.
+      const buf = term.buffer.active;
+      onDetachScrollRef.current?.(resetKey, Math.max(0, buf.baseY - buf.viewportY));
       artifacts.dispose();
       term.dispose();
       termRef.current = null;

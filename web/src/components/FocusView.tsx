@@ -79,6 +79,18 @@ export function FocusView({
   const name = nameOf(focused);
   const focusRootRef = useRef<HTMLDivElement>(null);
 
+  // Each session's terminal scroll offset (lines above the bottom) as of the
+  // last time it was detached — a ref, not state, since writing it (on every
+  // detach) must never itself trigger a re-render. Read back into
+  // TerminalView's initialScrollLinesFromBottom on the next attach for that
+  // session, so switching back doesn't always strand you at the bottom of
+  // whatever you'd scrolled away from reading.
+  const scrollMemory = useRef<Map<string, number>>(new Map());
+  const handleDetachScroll = (sessionId: string, linesFromBottom: number) => {
+    if (linesFromBottom > 0) scrollMemory.current.set(sessionId, linesFromBottom);
+    else scrollMemory.current.delete(sessionId);
+  };
+
   // Which sessions currently have their diff panel open — per-session, not
   // a single flag, so switching cards no longer forces you back to the
   // terminal: a session you left with the panel open shows it open again
@@ -286,6 +298,8 @@ export function FocusView({
             onInput={(data) => onSendTerminalKey(focused.sessionId, focused.cwd, data)}
             active={!subagentModal}
             resolveImageSrc={(p) => localImageUrl(focused.cwd, p)}
+            initialScrollLinesFromBottom={scrollMemory.current.get(focused.sessionId)}
+            onDetachScroll={handleDetachScroll}
           />
         )}
       </div>
