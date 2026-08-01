@@ -74,7 +74,14 @@ class RawParsePool {
   }
 
   private spawn(slot: number): void {
-    const worker = new Worker(resolveWorkerPath());
+    // Capped rather than left at the system-dependent default (which scales
+    // with total RAM — 512MB+ headroom on a big machine before a worker
+    // even notices it's stuck parsing an oversized transcript). A tighter
+    // cap means an oversized file's worker hits ERR_WORKER_OUT_OF_MEMORY
+    // (see the catch in parse() below) faster and with less transient
+    // memory pressure of its own, without changing the outcome for any
+    // normal-sized transcript.
+    const worker = new Worker(resolveWorkerPath(), { resourceLimits: { maxOldGenerationSizeMb: 512 } });
     worker.on('message', (msg: { id: number; raw?: RawSession | null; error?: string }) => {
       const req = this.pending.get(msg.id);
       if (!req) return; // late reply for a request already settled some other way
@@ -122,10 +129,27 @@ class RawParsePool {
       this.pending.set(id, { resolve, reject });
       worker.postMessage({ id, file });
     }).catch((e) => {
-      // A worker-side failure (crash, unexpected error) falls back to an
-      // in-process parse for THIS file rather than surfacing the error —
-      // matches parseSessionRaw's own existing `.catch(() => null)` callers'
-      // expectations (getRaw already treats a failed parse as "no card").
+      // A worker OOM'ing means the FILE ITSELF exceeded a heap limit while
+      // being parsed — falling back to an in-process retry would repeat the
+      // identical read+parse, but now competing with (and threatening) the
+      // daemon's own shared heap instead of an isolated worker's. Confirmed
+      // live (2026-08-01): this is exactly what took the whole daemon down
+      // — a worker OOM'd on one oversized transcript, the in-process retry
+      // OOM'd too, and THAT crash isn't scoped to one worker, it's the
+      // entire process. Treat an OOM'd file as unparseable instead — same
+      // as any other parse failure (getRaw's caller already handles `null`
+      // as "no card for this session") — rather than re-attempting an
+      // already-proven-too-large read+parse on the thread everything else
+      // depends on.
+      if (e instanceof Error && (e as NodeJS.ErrnoException).code === 'ERR_WORKER_OUT_OF_MEMORY') {
+        console.error('[rawParsePool] worker OOM crashed parsing', file, '— skipping (too large to parse safely)');
+        return null;
+      }
+      // Any other worker-side failure (crash, unexpected error) falls back
+      // to an in-process parse for THIS file rather than surfacing the
+      // error — matches parseSessionRaw's own existing `.catch(() => null)`
+      // callers' expectations (getRaw already treats a failed parse as "no
+      // card").
       console.error('[rawParsePool] worker parse failed, falling back in-process', file, e);
       return parseSessionRaw(file);
     });
