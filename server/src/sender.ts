@@ -298,13 +298,12 @@ function markRestored(sessionId: string): void {
   restoredAwaitingTouch.set(sessionId, Date.now());
 }
 
-/** Whether this session is still inside its post-restore grace. */
+/** Whether this session is still inside its post-restore grace. A pure read —
+ *  pruning lapsed entries is the sweep's job, so that asking the question can
+ *  never change the answer. */
 function isRestoreProtected(sessionId: string, now: number): boolean {
   const markedAt = restoredAwaitingTouch.get(sessionId);
-  if (markedAt === undefined) return false;
-  if (now - markedAt <= RESTORE_PROTECTION_MS) return true;
-  restoredAwaitingTouch.delete(sessionId); // grace expired; normal rules from here
-  return false;
+  return markedAt !== undefined && now - markedAt <= RESTORE_PROTECTION_MS;
 }
 
 /** Drop the restore exemption — the operator has arrived, so normal idle
@@ -683,19 +682,25 @@ export async function listLiveSessionIds(): Promise<Set<string>> {
  *  be ready. What a startup restore calls per session — deliberately the same
  *  path a send or an attach takes, so a restored session is indistinguishable
  *  from one the operator opened by hand. */
-export async function ensureSessionLive(sessionId: string, cwd: string): Promise<void> {
+export async function ensureSessionLive(sessionId: string, cwd: string): Promise<boolean> {
   // Only a session this restore actually brings up earns the exemption.
   // getOrSpawnPty happily returns an already-live pty, and the live-session
   // pre-flight is a single snapshot taken minutes earlier — so by the time
   // restore reaches a target, a client may have attached to it. Marking that
   // session would silently disable idle eviction on a session in active use,
   // with nothing logged to say so.
-  if (readyPtys.has(sessionId)) return;
+  //
+  // Returning false rather than just bailing matters: the caller reports what
+  // it did, and counting a session it never started as "restored" would make
+  // the one log an operator reads to confirm the feature worked say something
+  // that did not happen.
+  if (readyPtys.has(sessionId)) return false;
   // Marked before the spawn, so there is no window in which a sweep could
   // reach the session ahead of its protection.
   markRestored(sessionId);
   try {
     await getOrSpawnPty(sessionId, cwd);
+    return true;
   } catch (e) {
     endRestoreProtection(sessionId); // never came up; nothing to protect
     throw e;
@@ -1149,7 +1154,10 @@ export function evictIdlePtys(now: number = Date.now()): string[] {
     // A restored session nobody has reached yet is the whole point of a
     // startup restore — closing it would strand the operator exactly as if
     // it had never come back. Bounded: see RESTORE_PROTECTION_MS.
-    if (sid && isRestoreProtected(sid, now)) continue;
+    if (sid) {
+      if (isRestoreProtected(sid, now)) continue;
+      restoredAwaitingTouch.delete(sid); // grace lapsed, or was never held
+    }
     const ready = sid ? readyPtys.get(sid) : undefined;
     // An unidentified pty has no lastActivity to consult, so it ages from the
     // moment it spawned. Nothing will ever refresh it — that is the whole

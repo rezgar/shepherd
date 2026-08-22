@@ -68,7 +68,11 @@ export interface RestoreDeps {
    *  these collides: both run, neither errors, and their output interleaves
    *  into the same transcript (see sender.ts's isSessionLiveElsewhere). */
   listLiveSessionIds: () => Promise<Set<string>>;
-  spawn: (sessionId: string, cwd: string) => Promise<unknown>;
+  /** Brings the session up. Resolving `false` means it was already running,
+   *  so nothing was started — the pre-flight registry snapshot is taken once,
+   *  minutes before later targets are reached, so a client can attach to a
+   *  session in between. Anything other than `false` counts as restored. */
+  spawn: (sessionId: string, cwd: string) => Promise<boolean | void | unknown>;
   /** Whether a working directory still exists — worktrees get deleted while
    *  their transcripts stay behind. */
   exists?: (dir: string) => Promise<boolean>;
@@ -169,9 +173,15 @@ export async function restoreSessions(
       continue;
     }
     try {
-      await deps.spawn(t.sessionId, t.cwd);
-      outcome.restored.push(t.sessionId);
-      log(`[restore] ${short(t.sessionId)} restored — last active ${ago(t.lastActivity)} (${t.cwd})`);
+      const spawned = await deps.spawn(t.sessionId, t.cwd);
+      if (spawned === false) {
+        // Someone reached it between the pre-flight snapshot and now.
+        outcome.alreadyLive.push(t.sessionId);
+        log(`[restore] ${short(t.sessionId)} already running — skipped`);
+      } else {
+        outcome.restored.push(t.sessionId);
+        log(`[restore] ${short(t.sessionId)} restored — last active ${ago(t.lastActivity)} (${t.cwd})`);
+      }
     } catch (e) {
       outcome.failed.push({ sessionId: t.sessionId, error: msg(e) });
       log(`[restore] ${short(t.sessionId)} failed to restore: ${msg(e)}`);

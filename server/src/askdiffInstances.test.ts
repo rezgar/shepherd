@@ -43,12 +43,18 @@ describe('askdiffInstances', () => {
     await shutdownAllAskdiffInstances();
     // Windows keeps a handle on the directory for a moment after the child
     // processes exit, so this throws EPERM under load even though shutdown
-    // completed. The temp dir is disposable — failing the test over a
-    // cleanup race reports a defect that isn't there.
-    try {
-      rmSync(dir, { recursive: true, force: true });
-    } catch {
-      /* OS still holds a handle; the temp dir ages out on its own */
+    // completed. Retry briefly rather than swallowing unconditionally: if
+    // shutdownAllAskdiffInstances ever genuinely fails to kill its children,
+    // this failure is the only symptom, and a blanket catch would delete the
+    // signal along with the flake.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+        break;
+      } catch (e) {
+        if (attempt === 4) throw e;
+        await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+      }
     }
   });
 

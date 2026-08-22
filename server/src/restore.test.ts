@@ -167,6 +167,27 @@ describe('restoreSessions', () => {
     expect(out.restored).toEqual(['a', 'c']);
   });
 
+  // The pre-flight registry snapshot is taken once, before any spawn, so a
+  // client can attach to a later target while the restore is still working
+  // through earlier ones. Counting that as "restored" would make the one log
+  // an operator reads to confirm the feature worked report something that
+  // never happened.
+  it('reports a session it did not actually start as already running, not restored (CoD 4)', async () => {
+    // Ids kept to 8 characters — the log abbreviates session ids to that.
+    const lines: string[] = [];
+    const out = await restoreSessions(targets('spawnedx', 'attached'), {
+      listLiveSessionIds: async () => new Set<string>(),
+      exists: async () => true,
+      log: (m: string) => lines.push(m),
+      spawn: async (sessionId: string) => sessionId !== 'attached',
+    });
+
+    expect(out.restored).toEqual(['spawnedx']);
+    expect(out.alreadyLive).toEqual(['attached']);
+    expect(lines.some((l) => l.includes('attached') && l.includes('already running'))).toBe(true);
+    expect(lines.some((l) => l.includes('attached') && l.includes('restored'))).toBe(false);
+  });
+
   it('reads the live-session registry once, not once per session (CoD 4)', async () => {
     let calls = 0;
     const { deps } = recordingDeps({

@@ -309,7 +309,9 @@ console.log(`\nwaiting ${Math.round(waitMs / 1000)}s — past a ${IDLE_EVICT_MS 
 await new Promise((r) => setTimeout(r, waitMs));
 
 check('restored session survives real idle-eviction sweeps untouched', true, liveInteractiveIds().has(restorable.sid));
-check('the sweep did not report closing it', false, log.includes(`idle-evicted`) && log.includes(restorable.sid.slice(0, 8)));
+// Named for what it actually checks. The session id prefix appears in the
+// targets line regardless, so pairing the two would reduce to this anyway.
+check('the sweep evicted nothing at all', false, log.includes('idle-evicted'));
 
 await fetch(`http://127.0.0.1:${PORT}/shutdown`, { method: 'POST' }).catch(() => {});
 await new Promise((r) => daemon.on('exit', r));
