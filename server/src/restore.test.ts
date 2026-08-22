@@ -234,7 +234,7 @@ describe('restoreSessions', () => {
   // the desktop shell recycles a stale daemon. Without this the loop keeps
   // spawning processes after shutdown has already emptied the registry, and
   // the exit abandons them — the same orphan leak this work set out to close.
-  it('stops spawning once the daemon starts shutting down (CoD 7)', async () => {
+  it('stops spawning once the daemon starts shutting down', async () => {
     const order: string[] = [];
     let shuttingDown = false;
     const out = await restoreSessions(targets('a', 'b', 'c', 'd'), {

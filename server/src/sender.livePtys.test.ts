@@ -106,7 +106,12 @@ describe('live pty registry (CoD 7)', () => {
   it('reaps a pty that never finished starting, ageing it from its spawn time', async () => {
     spawnNeverQuiet = true;
     const id = sid('never-ready');
-    const spawnedAt = Date.now();
+    // Read BEFORE the spawn, so the pty's own recorded spawn time is at or
+    // after this. The margins below are therefore one-sided and generous —
+    // an earlier version used +/-1ms against this clock read and flipped a
+    // coin on whether the millisecond ticked in between, failing the suite
+    // in roughly half of all runs.
+    const beforeSpawn = Date.now();
     void attachTerminal(id, 'C:/repo', ws);
     await new Promise((r) => setTimeout(r, 100));
     expect(livePtyCount()).toBe(1);
@@ -115,7 +120,8 @@ describe('live pty registry (CoD 7)', () => {
     // lastActivity to consult — it ages from the moment it spawned instead.
     // Exactly the leak the old sweep could not see: that sweep walked only
     // readyPtys, so a process stuck here was invisible to it forever.
-    const closed = evictIdlePtys(spawnedAt + IDLE_EVICT_MS + 1);
+    // An hour past the threshold — far beyond any clock-read skew.
+    const closed = evictIdlePtys(beforeSpawn + IDLE_EVICT_MS + 3_600_000);
 
     expect(closed).toEqual([id]);
     expect(livePtyCount()).toBe(0);
@@ -123,11 +129,13 @@ describe('live pty registry (CoD 7)', () => {
 
   it('leaves a not-yet-idle unidentified pty alone', async () => {
     spawnNeverQuiet = true;
-    const spawnedAt = Date.now();
+    const beforeSpawn = Date.now();
     void attachTerminal(sid('never-ready'), 'C:/repo', ws);
     await new Promise((r) => setTimeout(r, 100));
 
-    expect(evictIdlePtys(spawnedAt + IDLE_EVICT_MS - 1000)).toEqual([]);
+    // Half the threshold — the pty's real spawn time is at or after
+    // beforeSpawn, so it is even younger than this makes it look.
+    expect(evictIdlePtys(beforeSpawn + IDLE_EVICT_MS / 2)).toEqual([]);
     expect(livePtyCount()).toBe(1);
   });
 
@@ -240,5 +248,38 @@ describe('a restored session survives until someone reaches it (CoD 9)', () => {
     await ensureSessionLive(id, 'C:/repo');
     await shutdownAllSessions();
     expect(isAwaitingFirstTouch(id)).toBe(false);
+  });
+
+  // The live-session pre-flight is one snapshot taken before any spawn, and a
+  // restore runs for minutes — so a client can attach to a session before
+  // restore reaches it. Exempting that session would silently disable idle
+  // eviction on one the operator is actively using, and log nothing.
+  it('does not exempt a session that was already live when restore reached it', async () => {
+    const id = sid('already-attached');
+    await attachTerminal(id, 'C:/repo', ws); // operator got there first
+    const attachedAt = Date.now();
+
+    await ensureSessionLive(id, 'C:/repo'); // restore arrives later
+
+    expect(isAwaitingFirstTouch(id)).toBe(false);
+    expect(evictIdlePtys(attachedAt + IDLE_EVICT_MS + 1)).toEqual([id]);
+  });
+
+  // "Bounded by the restore cap" bounds how many sessions are held, not for
+  // how long. Without an expiry an operator who never returns leaves up to
+  // RESTORE_MAX processes pinned for the daemon's whole life, each competing
+  // for its single event loop.
+  it('lets the exemption expire so an operator who never arrives cannot pin sessions forever', async () => {
+    const id = sid('restored');
+    await ensureSessionLive(id, 'C:/repo');
+    const restoredAt = Date.now();
+
+    // Well inside the grace: still protected, however idle.
+    expect(isAwaitingFirstTouch(id, restoredAt + 12 * 3_600_000)).toBe(true);
+    expect(evictIdlePtys(restoredAt + 12 * 3_600_000)).toEqual([]);
+
+    // Past it: back under the ordinary idle rule.
+    expect(isAwaitingFirstTouch(id, restoredAt + 25 * 3_600_000)).toBe(false);
+    expect(evictIdlePtys(restoredAt + 25 * 3_600_000)).toEqual([id]);
   });
 });

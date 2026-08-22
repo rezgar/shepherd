@@ -22,6 +22,12 @@ const fakeWs = () => ({ readyState: 1, send: () => {} });
 describe('askdiffInstances', () => {
   let dir: string;
 
+  // Every test here spawns real askdiff processes. Vitest's 5s default is not
+  // enough for that once the rest of the suite runs in parallel, which made
+  // the whole suite fail intermittently — on main as well as on this branch —
+  // regardless of what was actually being tested.
+  vi.setConfig({ testTimeout: 30_000 });
+
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'shepherd-askdiff-instances-'));
     git(dir, 'init', '-q', '-b', 'main');
@@ -35,7 +41,15 @@ describe('askdiffInstances', () => {
   afterEach(async () => {
     vi.useRealTimers();
     await shutdownAllAskdiffInstances();
-    rmSync(dir, { recursive: true, force: true });
+    // Windows keeps a handle on the directory for a moment after the child
+    // processes exit, so this throws EPERM under load even though shutdown
+    // completed. The temp dir is disposable — failing the test over a
+    // cleanup race reports a defect that isn't there.
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* OS still holds a handle; the temp dir ages out on its own */
+    }
   });
 
   it('spawns an instance and returns a listening port', async () => {

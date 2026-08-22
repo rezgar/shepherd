@@ -86,8 +86,13 @@ const FIND_NEW_SESSION_TIMEOUT_MS = 90_000;
  *  fewer idle-but-still-alive PTYs sitting around means less to compete
  *  with. 10min still comfortably outlasts a normal "reading the response"
  *  pause. */
-const IDLE_EVICT_MS = 10 * 60_000;
-const EVICT_SWEEP_MS = 5 * 60_000;
+/** Both overridable by env so the end-to-end harness can compress a
+ *  15-minute wait into seconds and still exercise the REAL sweep in a REAL
+ *  daemon — the only way to catch a restored session dying at the idle mark,
+ *  which is the regression this feature's protection exists to prevent.
+ *  Unset in normal use; same escape hatch as SHEPHERD_PROJECTS_DIR. */
+const IDLE_EVICT_MS = Number(process.env.SHEPHERD_IDLE_EVICT_MS ?? 10 * 60_000);
+const EVICT_SWEEP_MS = Number(process.env.SHEPHERD_EVICT_SWEEP_MS ?? 5 * 60_000);
 /** Gap between clearing the input line, typing text, and pressing Enter —
  *  each as its OWN `write()` call rather than one concatenated burst.
  *  Confirmed the hard way: writing `` `${text}\r` `` in a single call gets
@@ -256,11 +261,34 @@ function registerLivePty(p: IPty, cwd: string, sessionId: string | null): void {
  *  The exemption is per-session and lifts on first contact, so the cost is
  *  bounded: at most RESTORE_MAX sessions held until the operator actually
  *  arrives, after which they age out under the normal rule like any other. */
-const restoredAwaitingTouch = new Set<string>();
+const restoredAwaitingTouch = new Map<string, number>();
+
+/** How long a restored session may sit untouched before the normal idle rule
+ *  takes over again.
+ *
+ *  The exemption has to outlast a night — power returning at 03:00 with the
+ *  operator arriving at 08:00 is the scenario this whole feature exists for —
+ *  but it cannot be unbounded. Every pinned PTY competes for the daemon's
+ *  single event loop, which is what makes spawning a NEW session slow (#71
+ *  shortened idle eviction from 30min to 10min for exactly that reason), so
+ *  an operator who never comes back would otherwise leave up to RESTORE_MAX
+ *  processes pinned for the daemon's lifetime. 24h matches the window that
+ *  made the session restorable in the first place: if it has been a day, it
+ *  would no longer qualify for restore either. */
+const RESTORE_PROTECTION_MS = 24 * 3_600_000;
 
 /** Protect a session the startup restore just brought back. */
-export function markRestored(sessionId: string): void {
-  restoredAwaitingTouch.add(sessionId);
+function markRestored(sessionId: string): void {
+  restoredAwaitingTouch.set(sessionId, Date.now());
+}
+
+/** Whether this session is still inside its post-restore grace. */
+function isRestoreProtected(sessionId: string, now: number): boolean {
+  const markedAt = restoredAwaitingTouch.get(sessionId);
+  if (markedAt === undefined) return false;
+  if (now - markedAt <= RESTORE_PROTECTION_MS) return true;
+  restoredAwaitingTouch.delete(sessionId); // grace expired; normal rules from here
+  return false;
 }
 
 /** Drop the restore exemption — the operator has arrived, so normal idle
@@ -279,8 +307,8 @@ function endRestoreProtection(sessionId: string): void {
 
 /** Whether a restored session is still waiting to be touched — exported for
  *  the eviction tests. */
-export function isAwaitingFirstTouch(sessionId: string): boolean {
-  return restoredAwaitingTouch.has(sessionId);
+export function isAwaitingFirstTouch(sessionId: string, now: number = Date.now()): boolean {
+  return isRestoreProtected(sessionId, now);
 }
 
 /** Attach a session id to an already-registered pty, once discovery finds it. */
@@ -640,6 +668,13 @@ export async function listLiveSessionIds(): Promise<Set<string>> {
  *  path a send or an attach takes, so a restored session is indistinguishable
  *  from one the operator opened by hand. */
 export async function ensureSessionLive(sessionId: string, cwd: string): Promise<void> {
+  // Only a session this restore actually brings up earns the exemption.
+  // getOrSpawnPty happily returns an already-live pty, and the live-session
+  // pre-flight is a single snapshot taken minutes earlier — so by the time
+  // restore reaches a target, a client may have attached to it. Marking that
+  // session would silently disable idle eviction on a session in active use,
+  // with nothing logged to say so.
+  if (readyPtys.has(sessionId)) return;
   // Marked before the spawn, so there is no window in which a sweep could
   // reach the session ahead of its protection.
   markRestored(sessionId);
@@ -1097,8 +1132,8 @@ export function evictIdlePtys(now: number = Date.now()): string[] {
     if (sid && isPinned(sid)) continue;
     // A restored session nobody has reached yet is the whole point of a
     // startup restore — closing it would strand the operator exactly as if
-    // it had never come back.
-    if (sid && restoredAwaitingTouch.has(sid)) continue;
+    // it had never come back. Bounded: see RESTORE_PROTECTION_MS.
+    if (sid && isRestoreProtected(sid, now)) continue;
     const ready = sid ? readyPtys.get(sid) : undefined;
     // An unidentified pty has no lastActivity to consult, so it ages from the
     // moment it spawned. Nothing will ever refresh it — that is the whole
@@ -1108,7 +1143,6 @@ export function evictIdlePtys(now: number = Date.now()): string[] {
     const lastActivity = ready?.lastActivity ?? live.spawnedAt;
     if (now - lastActivity <= IDLE_EVICT_MS) continue;
     livePtys.delete(pid);
-    if (sid) restoredAwaitingTouch.delete(sid);
     if (sid && readyPtys.get(sid)?.pid === pid) readyPtys.delete(sid);
     closed.push(sid ?? `unidentified pid ${pid}`);
     void gracefulClose(live.pty);

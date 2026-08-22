@@ -13,14 +13,20 @@
  * this machine, so it needs a `~/.claude/projects` with at least one session
  * active in the last 24h. Every branch of the restore is represented:
  *
- *   - a recently-active session          -> restored
+ *   - a recently-active session          -> restored, and reachable remotely
  *   - a session already running          -> skipped, already running
  *   - a second file with the same id     -> collapsed to one target
  *   - a session whose cwd was deleted    -> skipped, missing cwd
  *   - a session stale beyond the window  -> never selected
  *   - a subagent transcript              -> never treated as a session
  *
- * Exits non-zero on the first failed expectation.
+ * It then compresses the idle-eviction timeline and waits past it, to prove a
+ * restored session is not closed before the operator arrives — the regression
+ * that shipped in this feature's first implementation and that no assertion
+ * caught, because the harness used to shut down long before the idle mark.
+ *
+ * Assertions that the machine's state makes impossible are reported as SKIP
+ * and counted separately; "0 failed" with skips is not a clean run.
  */
 import { execFileSync, execSync, spawn } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, statSync, existsSync, utimesSync } from 'node:fs';
@@ -33,10 +39,19 @@ const PORT = 4199;
 const DAY_MS = 24 * 3_600_000;
 
 let failures = 0;
+let passes = 0;
+let skips = 0;
 const check = (label, expected, actual) => {
   const ok = JSON.stringify(expected) === JSON.stringify(actual);
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}\n        expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
-  if (!ok) failures += 1;
+  ok ? (passes += 1) : (failures += 1);
+};
+/** A check the machine's state made impossible to run. Counted and printed —
+ *  a silently skipped assertion still reports "all assertions passed", which
+ *  is how a suite quietly shrinks without anyone noticing. */
+const skip = (label, why) => {
+  console.log(`SKIP  ${label}\n        ${why}`);
+  skips += 1;
 };
 
 /** Live `claude` processes, counted the same way on Windows and elsewhere. */
@@ -56,11 +71,6 @@ function claudeProcessCount() {
   }
 }
 
-/** Throws rather than returning an empty set on failure. Failing open here
- *  would silently pick an already-running session as the restore target and
- *  then report a false negative — which is exactly what happened the first
- *  time this ran, because `claude` on Windows is a .cmd/.ps1 shim that
- *  execFile cannot invoke without a shell. */
 /** Every session id the CLI knows a process for, of ANY kind. Used to choose
  *  a genuinely dormant session to restore: an id the CLI daemon already holds
  *  as a background worker does not surface a second *interactive* entry when
@@ -71,11 +81,42 @@ function allRegisteredIds() {
   return new Set(JSON.parse(out).map((a) => a.sessionId));
 }
 
+/** Session ids with a live INTERACTIVE process — what a restore collides
+ *  with, and what makes a session reachable from phone or web.
+ *
+ *  Throws rather than returning an empty set on failure. Failing open here
+ *  would silently pick an already-running session as the restore target and
+ *  then report a false negative — which is exactly what happened the first
+ *  time this ran, because `claude` on Windows is a .cmd/.ps1 shim that
+ *  execFile cannot invoke without a shell. */
 function liveInteractiveIds() {
   // execSync, not execFileSync+shell: passing an args array with shell:true is
   // deprecated (DEP0190) because the args are concatenated unescaped.
   const out = execSync('claude agents --json', { encoding: 'utf8', timeout: 30_000 });
   return new Set(JSON.parse(out).filter((a) => a.kind === 'interactive').map((a) => a.sessionId));
+}
+
+const SUBAGENT_ID = 'aaaae2ea-0000-1111-2222-333333333333';
+const MISSING_CWD_ID = 'deadbeef-0000-1111-2222-333333333333';
+
+/** A copy of a transcript rewritten to declare a different session id and
+ *  working directory — so a fixture entry is a genuinely distinct session
+ *  rather than a duplicate that collapses into another target. */
+function reidentify(srcFile, sessionId, cwd) {
+  return readFileSync(srcFile, 'utf8')
+    .split('\n')
+    .filter((l) => l.trim())
+    .map((l) => {
+      try {
+        const j = JSON.parse(l);
+        if (j.sessionId) j.sessionId = sessionId;
+        if (j.cwd) j.cwd = cwd;
+        return JSON.stringify(j);
+      } catch {
+        return l;
+      }
+    })
+    .join('\n');
 }
 
 /** First sessionId + cwd declared inside a transcript. */
@@ -153,31 +194,25 @@ function buildFixture() {
   if (stale) copy(stale.file, restorable.project, `stale-${path.basename(stale.file)}`);
 
   // A subagent transcript, one level deeper — must never be seen as a session.
+  // It carries its OWN session id: a byte copy would inherit `restorable`'s
+  // id, which duplicate-collapsing would then fold into the existing target,
+  // making the subagent indistinguishable from correct behaviour. With a
+  // distinct id, its appearance among the targets is unambiguous evidence of
+  // failure.
   const subDir = path.join(FIXTURE, restorable.project, path.basename(restorable.file, '.jsonl'), 'subagents');
   mkdirSync(subDir, { recursive: true });
-  writeFileSync(path.join(subDir, 'agent-e2e.jsonl'), readFileSync(restorable.file));
+  writeFileSync(path.join(subDir, 'agent-e2e.jsonl'), reidentify(restorable.file, SUBAGENT_ID, restorable.cwd));
 
   // A session whose worktree no longer exists.
-  const gone = readFileSync(restorable.file, 'utf8')
-    .split('\n')
-    .filter((l) => l.trim())
-    .map((l) => {
-      try {
-        const j = JSON.parse(l);
-        if (j.sessionId) j.sessionId = 'deadbeef-0000-1111-2222-333333333333';
-        if (j.cwd) j.cwd = path.join(os.tmpdir(), 'shepherd-e2e-deleted-worktree');
-        return JSON.stringify(j);
-      } catch {
-        return l;
-      }
-    })
-    .join('\n');
-  writeFileSync(path.join(FIXTURE, restorable.project, 'deadbeef-0000-1111-2222-333333333333.jsonl'), gone);
+  writeFileSync(
+    path.join(FIXTURE, restorable.project, `${MISSING_CWD_ID}.jsonl`),
+    reidentify(restorable.file, MISSING_CWD_ID, path.join(os.tmpdir(), 'shepherd-e2e-deleted-worktree')),
+  );
 
-  return { restorable, alreadyRunning };
+  return { restorable, alreadyRunning, stale };
 }
 
-const { restorable, alreadyRunning } = buildFixture();
+const { restorable, alreadyRunning, stale } = buildFixture();
 console.log(`fixture at ${FIXTURE}`);
 console.log(`  expect restored:       ${restorable.sid.slice(0, 8)} (${restorable.cwd})`);
 console.log(`  expect already-running: ${alreadyRunning ? alreadyRunning.sid.slice(0, 8) : '(none available)'}`);
@@ -185,8 +220,22 @@ console.log(`  expect already-running: ${alreadyRunning ? alreadyRunning.sid.sli
 const before = claudeProcessCount();
 console.log(`\nclaude processes before: ${before}`);
 
+// Compress the idle-eviction timeline so the real sweep, in the real daemon,
+// runs several times within this script's lifetime. Without this the harness
+// shuts down a couple of minutes after restore and could never observe a
+// restored session dying at the idle mark — which is the exact regression the
+// restore exemption exists to prevent, and which shipped once already.
+const IDLE_EVICT_MS = 15_000;
+const SWEEP_MS = 5_000;
+
 const daemon = spawn(process.execPath, [path.join(import.meta.dirname, '..', 'node_modules', 'tsx', 'dist', 'cli.mjs'), path.join(import.meta.dirname, '..', 'src', 'index.ts')], {
-  env: { ...process.env, SHEPHERD_PROJECTS_DIR: FIXTURE, SHEPHERD_PORT: String(PORT) },
+  env: {
+    ...process.env,
+    SHEPHERD_PROJECTS_DIR: FIXTURE,
+    SHEPHERD_PORT: String(PORT),
+    SHEPHERD_IDLE_EVICT_MS: String(IDLE_EVICT_MS),
+    SHEPHERD_EVICT_SWEEP_MS: String(SWEEP_MS),
+  },
   stdio: ['ignore', 'pipe', 'pipe'],
 });
 
@@ -223,15 +272,44 @@ for (const deadline = Date.now() + 300_000; Date.now() < deadline; ) {
 }
 console.log();
 
+/** The one line naming every target the restore chose. Assertions about what
+ *  was NOT selected have to read this — a session that was never a target
+ *  produces no log line of its own, so "absent from the log" would pass
+ *  vacuously. */
+const targetsLine = (log.split('\n').find((l) => l.includes('session(s) to restore:')) ?? '');
+
 console.log('\n--- assertions ---');
+check('a targets line was logged at all', true, targetsLine.length > 0);
 check('the chosen session was restored exactly once (duplicate id collapsed)', 1, (log.match(new RegExp(`${restorable.sid.slice(0, 8)} restored`, 'g')) ?? []).length);
 check('restored session is running and reachable (listed as interactive)', true, liveNow.has(restorable.sid));
-check('process count grew while restored', true, during > before);
-check('session with a deleted worktree was skipped', true, log.includes('deadbeef skipped — working directory is gone'));
-check('no subagent transcript was restored', false, log.includes('agent-e2e'));
+check('session with a deleted worktree was skipped', true, log.includes(`${MISSING_CWD_ID.slice(0, 8)} skipped — working directory is gone`));
+// Asserted against the targets line, not against absence from the whole log:
+// a subagent that was never selected logs nothing either way.
+check('no subagent transcript was selected as a session', false, targetsLine.includes(SUBAGENT_ID.slice(0, 8)));
+if (stale) {
+  check('the stale session was not selected', false, targetsLine.includes(stale.sid.slice(0, 8)));
+} else {
+  skip('the stale session was not selected', 'no transcript older than 3 days on this machine');
+}
 if (alreadyRunning) {
   check('already-running session was skipped', true, log.includes(`${alreadyRunning.sid.slice(0, 8)} already running`));
+} else {
+  skip('already-running session was skipped', 'no live interactive session to use as a fixture');
 }
+console.log(`\n(process counts: ${before} before, ${during} during — informational only; the real Shepherd daemon on this machine spawns its own sessions and probes throughout, so counts are not asserted)`);
+
+// THE regression test for this feature's own history. The first implementation
+// restored sessions correctly and then let the idle sweep close every one of
+// them 10-15 minutes later, so an operator arriving hours after a power cut
+// found nothing — and no assertion caught it, because the harness shut the
+// daemon down long before the idle mark. With the timeline compressed above,
+// the real sweep has now had several passes at this session.
+const waitMs = IDLE_EVICT_MS + 3 * SWEEP_MS + 5_000;
+console.log(`\nwaiting ${Math.round(waitMs / 1000)}s — past a ${IDLE_EVICT_MS / 1000}s idle threshold with sweeps every ${SWEEP_MS / 1000}s...`);
+await new Promise((r) => setTimeout(r, waitMs));
+
+check('restored session survives real idle-eviction sweeps untouched', true, liveInteractiveIds().has(restorable.sid));
+check('the sweep did not report closing it', false, log.includes(`idle-evicted`) && log.includes(restorable.sid.slice(0, 8)));
 
 await fetch(`http://127.0.0.1:${PORT}/shutdown`, { method: 'POST' }).catch(() => {});
 await new Promise((r) => daemon.on('exit', r));
@@ -253,5 +331,6 @@ console.log(`\nclaude processes: ${before} before, ${during} during, ${after} af
 check('the restored session is gone after shutdown', false, stillLive);
 
 rmSync(path.dirname(FIXTURE), { recursive: true, force: true });
-console.log(failures ? `\n${failures} FAILED` : '\nall assertions passed');
+console.log(`\n${passes} passed, ${failures} failed, ${skips} skipped`);
+if (skips) console.log('(a skipped assertion is not a passing one — see the SKIP lines above for why)');
 process.exit(failures ? 1 : 0);

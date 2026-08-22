@@ -171,7 +171,7 @@ export async function restoreSessions(
     try {
       await deps.spawn(t.sessionId, t.cwd);
       outcome.restored.push(t.sessionId);
-      log(`[restore] ${short(t.sessionId)} restored (${t.cwd})`);
+      log(`[restore] ${short(t.sessionId)} restored — last active ${ago(t.lastActivity)} (${t.cwd})`);
     } catch (e) {
       outcome.failed.push({ sessionId: t.sessionId, error: msg(e) });
       log(`[restore] ${short(t.sessionId)} failed to restore: ${msg(e)}`);
@@ -191,4 +191,11 @@ function msg(e: unknown): string {
 
 function short(sessionId: string): string {
   return sessionId.slice(0, 8);
+}
+
+/** Human-readable age, so the boot log says which sessions came back rather
+ *  than only how many. */
+function ago(at: number, now: number = Date.now()): string {
+  const m = Math.max(0, Math.round((now - at) / 60_000));
+  return m < 60 ? `${m}m ago` : `${Math.round(m / 60)}h ago`;
 }
