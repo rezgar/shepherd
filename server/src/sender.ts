@@ -86,13 +86,29 @@ const FIND_NEW_SESSION_TIMEOUT_MS = 90_000;
  *  fewer idle-but-still-alive PTYs sitting around means less to compete
  *  with. 10min still comfortably outlasts a normal "reading the response"
  *  pause. */
+/** A positive-number env override, falling back to the default on anything
+ *  else. A bare `Number(process.env.X ?? d)` yields NaN for a malformed
+ *  value, and NaN poisons the comparison in the wrong direction: `x <= NaN`
+ *  is false, so the sweep would stop skipping and close every pty on its
+ *  first pass. A typo in an env var must not silently kill live sessions. */
+function msFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) {
+    console.error(`[shepherd] ignoring ${name}=${JSON.stringify(raw)} — not a positive number; using ${fallback}ms`);
+    return fallback;
+  }
+  return n;
+}
+
 /** Both overridable by env so the end-to-end harness can compress a
  *  15-minute wait into seconds and still exercise the REAL sweep in a REAL
  *  daemon — the only way to catch a restored session dying at the idle mark,
  *  which is the regression this feature's protection exists to prevent.
  *  Unset in normal use; same escape hatch as SHEPHERD_PROJECTS_DIR. */
-const IDLE_EVICT_MS = Number(process.env.SHEPHERD_IDLE_EVICT_MS ?? 10 * 60_000);
-const EVICT_SWEEP_MS = Number(process.env.SHEPHERD_EVICT_SWEEP_MS ?? 5 * 60_000);
+const IDLE_EVICT_MS = msFromEnv('SHEPHERD_IDLE_EVICT_MS', 10 * 60_000);
+const EVICT_SWEEP_MS = msFromEnv('SHEPHERD_EVICT_SWEEP_MS', 5 * 60_000);
 /** Gap between clearing the input line, typing text, and pressing Enter —
  *  each as its OWN `write()` call rather than one concatenated burst.
  *  Confirmed the hard way: writing `` `${text}\r` `` in a single call gets
