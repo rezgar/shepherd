@@ -167,51 +167,70 @@ async function scrapeUsage(): Promise<Limits> {
     return { session: null, weekly: null };
   }
 
+  // The probe's process must die on EVERY path out of here, which is why the
+  // kill lives in a finally rather than as the last statement of the happy
+  // path. It used to be the latter, so any throw in between — a terminal
+  // write, a parse of a half-rendered panel — left a full `claude` process
+  // alive with nothing referencing it. computeLimits' caller logs and
+  // swallows that throw, so the leak was silent, and this probe runs every
+  // five minutes: exactly the shape of the multi-day-old orphans found
+  // holding hundreds of MB each.
+  try {
+    return await readUsagePanel(p);
+  } finally {
+    try {
+      p.kill();
+    } catch {
+      /* already dead */
+    }
+    cleanupProbeFiles();
+  }
+}
+
+/** Drive the freshly-spawned probe to its `/usage` panel and read the bars off
+ *  it. Owns only the virtual screen; the caller owns the process. */
+async function readUsagePanel(p: IPty): Promise<Limits> {
   // allowProposedApi is required at runtime to use `.buffer` at all — despite
   // the name, reading rendered line text is the whole reason to use this
   // package here, not an edge case.
   const term = new HeadlessTerminal({ cols: PROBE_COLS, rows: PROBE_ROWS, scrollback: 0, allowProposedApi: true });
-  let lastDataAt = Date.now();
-  p.onData((chunk) => {
-    term.write(chunk);
-    lastDataAt = Date.now();
-  });
-
-  const quietDeadline = Date.now() + PROBE_MAX_WAIT_MS;
-  while (Date.now() - lastDataAt < PROBE_QUIET_MS) {
-    if (Date.now() > quietDeadline) break; // give up waiting for quiet, try typing anyway
-    await new Promise((r) => setTimeout(r, 150));
-  }
-
   try {
-    p.write('\x01\x0b'); // clear whatever's on the input line first
-    await new Promise((r) => setTimeout(r, 100));
-    p.write('/usage');
-    await new Promise((r) => setTimeout(r, 100));
-    p.write('\r');
-  } catch {
-    /* already dead */
-  }
+    let lastDataAt = Date.now();
+    p.onData((chunk) => {
+      term.write(chunk);
+      lastDataAt = Date.now();
+    });
 
-  const overallDeadline = Date.now() + PROBE_TOTAL_TIMEOUT_MS;
-  let result: Limits = { session: null, weekly: null };
-  while (Date.now() < overallDeadline) {
-    await new Promise((r) => setTimeout(r, 400));
-    const parsed = tryParse(renderScreenText(term));
-    if (parsed) {
-      result = parsed;
-      if (parsed.session && parsed.weekly) break; // got both bars — no need to wait out the rest of the panel
+    const quietDeadline = Date.now() + PROBE_MAX_WAIT_MS;
+    while (Date.now() - lastDataAt < PROBE_QUIET_MS) {
+      if (Date.now() > quietDeadline) break; // give up waiting for quiet, try typing anyway
+      await new Promise((r) => setTimeout(r, 150));
     }
-  }
 
-  try {
-    p.kill();
-  } catch {
-    /* already dead */
+    try {
+      p.write('\x01\x0b'); // clear whatever's on the input line first
+      await new Promise((r) => setTimeout(r, 100));
+      p.write('/usage');
+      await new Promise((r) => setTimeout(r, 100));
+      p.write('\r');
+    } catch {
+      /* already dead */
+    }
+
+    const overallDeadline = Date.now() + PROBE_TOTAL_TIMEOUT_MS;
+    let result: Limits = { session: null, weekly: null };
+    while (Date.now() < overallDeadline) {
+      await new Promise((r) => setTimeout(r, 400));
+      const parsed = tryParse(renderScreenText(term));
+      if (parsed) {
+        result = parsed;
+        if (parsed.session && parsed.weekly) break; // got both bars — no need to wait out the rest of the panel
+      }
+    }
+    return result;
+  } finally {
+    term.dispose();
   }
-  term.dispose();
-  cleanupProbeFiles();
-  return result;
 }
 
 export async function computeLimits(): Promise<Limits> {

@@ -10,7 +10,10 @@ import type { AgentModel } from './types.js';
 
 const pexec = promisify(execFile);
 
-export const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
+/** Env override exists so tests can point the scanner at a fixture tree —
+ *  same escape hatch as SHEPHERD_WINDOW_HOURS below. Unset in normal use. */
+export const PROJECTS_DIR =
+  process.env.SHEPHERD_PROJECTS_DIR ?? path.join(os.homedir(), '.claude', 'projects');
 
 /** Server keeps a generous window; the UI narrows it live. Must cover the
  *  longest window the UI dropdown offers (currently 30 days) or sessions

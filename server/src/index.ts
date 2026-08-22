@@ -6,7 +6,8 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import chokidar from 'chokidar';
 import { scanAll, PROJECTS_DIR } from './scan.js';
 import { parseTranscript } from './transcript.js';
-import { attachTerminal, detachTerminal, writeTermInput, resizeTerm, sendTerminalKey, spawnSession, startIdleEvictionSweep, shutdownAllSessions, pinSession, unpinSession, unpinAllForConnection } from './sender.js';
+import { attachTerminal, detachTerminal, writeTermInput, resizeTerm, sendTerminalKey, spawnSession, startIdleEvictionSweep, shutdownAllSessions, pinSession, unpinSession, unpinAllForConnection, noteTranscriptActivity, listLiveSessionIds, ensureSessionLive } from './sender.js';
+import { selectRestoreTargets, restoreSessions } from './restore.js';
 import { computeLimits, type Limits } from './usage.js';
 import { listDir } from './browse.js';
 import type { Snapshot } from './types.js';
@@ -232,6 +233,21 @@ async function main() {
 
   startIdleEvictionSweep();
   startAskdiffIdleEvictionSweep();
+
+  // Bring back what was recently in use. A session is only reachable from
+  // phone or web while its process is alive, so after an unattended reboot
+  // there is nothing to connect to and — being remote — nobody who can click
+  // to start one. Deliberately not awaited: it is minutes of sequential cold
+  // starts, and the daemon must serve clients throughout.
+  void restoreSessions(selectRestoreTargets(current.agents, Date.now()), {
+    listLiveSessionIds,
+    spawn: ensureSessionLive,
+    // Restore runs for minutes; a shutdown in that window must stop it, or it
+    // keeps spawning `claude` processes after shutdownAllSessions has already
+    // emptied the registry and the exit abandons them.
+    isCancelled: () => shuttingDown,
+    log: (m) => console.log(m),
+  }).catch((e) => console.error('[restore] aborted:', e));
 
   const broadcast = () => {
     const data = JSON.stringify(current);
@@ -517,6 +533,12 @@ async function main() {
   const subTimers = new WeakMap<FocusWs, NodeJS.Timeout>();
   const onEvt = (p: string) => {
     if (!p.endsWith('.jsonl')) return;
+    // A transcript write is the one activity signal that catches every turn
+    // regardless of who drove it — including a session being driven from
+    // phone or web, which never touches Shepherd's own input path and would
+    // otherwise be evicted as idle mid-conversation. A subagent file's
+    // basename never matches a session id, so those are inert here.
+    noteTranscriptActivity(path.basename(p, '.jsonl'));
     rescan();
     const np = norm(p);
     for (const c of wss.clients as Set<FocusWs>) {
