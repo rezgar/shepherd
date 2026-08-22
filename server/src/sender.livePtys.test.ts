@@ -61,8 +61,16 @@ vi.mock('./claudeExecutable.js', () => ({
   resolveClaudeExecutable: () => 'claude-stub',
 }));
 
-const { attachTerminal, evictIdlePtys, livePtyCount, noteTranscriptActivity, shutdownAllSessions } =
-  await import('./sender.js');
+const {
+  attachTerminal,
+  evictIdlePtys,
+  livePtyCount,
+  noteTranscriptActivity,
+  shutdownAllSessions,
+  ensureSessionLive,
+  isAwaitingFirstTouch,
+  writeTermInput,
+} = await import('./sender.js');
 
 const IDLE_EVICT_MS = 10 * 60_000;
 const ws = { readyState: 1, send: () => {} };
@@ -169,5 +177,68 @@ describe('transcript activity keeps a session alive (CoD 8)', () => {
 
   it('ignores transcript activity for a session it does not hold', () => {
     expect(() => noteTranscriptActivity('not-a-session', Date.now())).not.toThrow();
+  });
+});
+
+/** Without this the feature undoes itself: a restored session is idle by
+ *  design, so the ordinary rule would close it 10-15 minutes after boot and
+ *  the operator — who is remote, hours away, and cannot click anything —
+ *  would find nothing to connect to. Found by an independent review of the
+ *  first implementation, which shipped the activity tracking but not the
+ *  exemption. */
+describe('a restored session survives until someone reaches it (CoD 9)', () => {
+  it('is not evicted while still untouched, however long it sits', async () => {
+    const id = sid('restored');
+    await ensureSessionLive(id, 'C:/repo');
+    const readyAt = Date.now();
+    expect(isAwaitingFirstTouch(id)).toBe(true);
+
+    // Hours later — the operator is still asleep on the other side of the
+    // country. The session must still be there.
+    expect(evictIdlePtys(readyAt + 6 * 3_600_000)).toEqual([]);
+    expect(livePtyCount()).toBe(1);
+  });
+
+  it('is not kept alive by its own resume writing to the transcript', async () => {
+    const id = sid('restored');
+    await ensureSessionLive(id, 'C:/repo');
+    const readyAt = Date.now();
+
+    // `claude --resume` appends to the transcript as it starts up (confirmed
+    // against a real restore), so transcript activity must NOT count as the
+    // operator arriving — otherwise the exemption lifts seconds after boot.
+    noteTranscriptActivity(id, readyAt + 1000);
+
+    expect(isAwaitingFirstTouch(id)).toBe(true);
+    expect(evictIdlePtys(readyAt + 6 * 3_600_000)).toEqual([]);
+  });
+
+  it('goes back under the normal idle rule once a terminal attaches', async () => {
+    const id = sid('restored');
+    await ensureSessionLive(id, 'C:/repo');
+    expect(isAwaitingFirstTouch(id)).toBe(true);
+
+    await attachTerminal(id, 'C:/repo', ws);
+    const touchedAt = Date.now();
+
+    expect(isAwaitingFirstTouch(id)).toBe(false);
+    expect(evictIdlePtys(touchedAt + IDLE_EVICT_MS + 1)).toEqual([id]);
+  });
+
+  it('goes back under the normal idle rule once input is sent', async () => {
+    const id = sid('restored');
+    await ensureSessionLive(id, 'C:/repo');
+    await writeTermInput(id, 'C:/repo', 'hello', undefined);
+    const touchedAt = Date.now();
+
+    expect(isAwaitingFirstTouch(id)).toBe(false);
+    expect(evictIdlePtys(touchedAt + IDLE_EVICT_MS + 1)).toEqual([id]);
+  });
+
+  it('drops the exemption when the session is closed, leaving nothing behind', async () => {
+    const id = sid('restored');
+    await ensureSessionLive(id, 'C:/repo');
+    await shutdownAllSessions();
+    expect(isAwaitingFirstTouch(id)).toBe(false);
   });
 });

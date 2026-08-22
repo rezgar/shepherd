@@ -1,4 +1,4 @@
-import { access } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import type { AgentModel } from './types.js';
 
 /** How far back a session's last conversation activity can be and still be
@@ -72,6 +72,13 @@ export interface RestoreDeps {
   /** Whether a working directory still exists — worktrees get deleted while
    *  their transcripts stay behind. */
   exists?: (dir: string) => Promise<boolean>;
+  /** Checked before every spawn so a daemon shutdown stops the restore.
+   *  Without it, a restore in flight keeps spawning processes AFTER
+   *  shutdownAllSessions has already emptied the registry — and the exit
+   *  abandons them, recreating exactly the orphaned-process leak this work
+   *  set out to close. The window is minutes wide and starts at boot, which
+   *  is precisely when the desktop shell recycles a stale daemon. */
+  isCancelled?: () => boolean;
   log?: (msg: string) => void;
 }
 
@@ -80,12 +87,16 @@ export interface RestoreOutcome {
   alreadyLive: string[];
   missingCwd: string[];
   failed: { sessionId: string; error: string }[];
+  /** Targets never attempted because the daemon began shutting down. */
+  cancelled: string[];
 }
 
 async function dirExists(dir: string): Promise<boolean> {
   try {
-    await access(dir);
-    return true;
+    // isDirectory, not merely "the path resolves" — a worktree replaced by a
+    // file of the same name would pass an existence check and then be handed
+    // to pty.spawn as a working directory.
+    return (await stat(dir)).isDirectory();
   } catch {
     return false;
   }
@@ -108,7 +119,14 @@ export async function restoreSessions(
 ): Promise<RestoreOutcome> {
   const log = deps.log ?? (() => {});
   const exists = deps.exists ?? dirExists;
-  const outcome: RestoreOutcome = { restored: [], alreadyLive: [], missingCwd: [], failed: [] };
+  const isCancelled = deps.isCancelled ?? (() => false);
+  const outcome: RestoreOutcome = {
+    restored: [],
+    alreadyLive: [],
+    missingCwd: [],
+    failed: [],
+    cancelled: [],
+  };
 
   if (!targets.length) {
     log('[restore] no sessions with recent activity — nothing to restore');
@@ -134,7 +152,12 @@ export async function restoreSessions(
     live = new Set();
   }
 
-  for (const t of targets) {
+  for (const [i, t] of targets.entries()) {
+    if (isCancelled()) {
+      outcome.cancelled = targets.slice(i).map((r) => r.sessionId);
+      log(`[restore] cancelled — daemon is shutting down, ${outcome.cancelled.length} target(s) not attempted`);
+      return outcome;
+    }
     if (live.has(t.sessionId)) {
       outcome.alreadyLive.push(t.sessionId);
       log(`[restore] ${short(t.sessionId)} already running — skipped`);

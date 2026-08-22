@@ -243,6 +243,46 @@ function registerLivePty(p: IPty, cwd: string, sessionId: string | null): void {
   livePtys.set(pid, { pty: p, pid, cwd, sessionId, spawnedAt: Date.now() });
 }
 
+/** Sessions brought back by a startup restore that nobody has touched yet —
+ *  exempt from idle eviction until they are.
+ *
+ *  Without this the feature undoes itself. A restored session is idle BY
+ *  DESIGN (it comes back warm and waiting, it does not resume working), so
+ *  nothing refreshes its lastActivity: no transcript writes, no input through
+ *  Shepherd, no client pin. The sweep would close every restored session
+ *  10-15 minutes after boot — so power returning at 03:00 would leave the
+ *  operator just as stranded at 08:00 as if nothing had been restored.
+ *
+ *  The exemption is per-session and lifts on first contact, so the cost is
+ *  bounded: at most RESTORE_MAX sessions held until the operator actually
+ *  arrives, after which they age out under the normal rule like any other. */
+const restoredAwaitingTouch = new Set<string>();
+
+/** Protect a session the startup restore just brought back. */
+export function markRestored(sessionId: string): void {
+  restoredAwaitingTouch.add(sessionId);
+}
+
+/** Drop the restore exemption — the operator has arrived, so normal idle
+ *  rules apply from here.
+ *
+ *  Deliberately NOT called on transcript activity, unlike lastActivity.
+ *  Confirmed empirically: `claude --resume` appends to the session's
+ *  transcript as it starts up (the resumed file grew by ~3KB the moment a
+ *  restore ran), so treating a transcript write as contact would lift the
+ *  exemption seconds after restore and put every session straight back under
+ *  the 10-minute rule — the exact failure the exemption exists to prevent.
+ *  Only a human reaching the session through Shepherd counts. */
+function endRestoreProtection(sessionId: string): void {
+  restoredAwaitingTouch.delete(sessionId);
+}
+
+/** Whether a restored session is still waiting to be touched — exported for
+ *  the eviction tests. */
+export function isAwaitingFirstTouch(sessionId: string): boolean {
+  return restoredAwaitingTouch.has(sessionId);
+}
+
 /** Attach a session id to an already-registered pty, once discovery finds it. */
 function noteLivePtySession(p: IPty, sessionId: string): void {
   const live = livePtys.get(p.pid ?? -1);
@@ -250,11 +290,21 @@ function noteLivePtySession(p: IPty, sessionId: string): void {
 }
 
 function unregisterLivePty(p: IPty): void {
-  livePtys.delete(p.pid ?? -1);
+  const pid = p.pid ?? -1;
+  // Identity-checked, not a bare delete by pid. gracefulClose takes seconds
+  // to actually kill a process, and a pty spawned in that window can be
+  // handed the recycled pid — a late onExit from the dead one would then
+  // deregister the LIVE one, making it invisible to both the sweep and
+  // shutdown. That is precisely the leak this registry exists to close.
+  // Same guard readyPtys already uses on its own exit paths.
+  const live = livePtys.get(pid);
+  if (live && live.pty !== p) return;
+  livePtys.delete(pid);
+  if (live?.sessionId) restoredAwaitingTouch.delete(live.sessionId);
 }
 
-/** How many ptys this daemon currently holds. Exported for the startup log
- *  line and for tests that assert the registry actually tracks a spawn. */
+/** How many ptys this daemon currently holds. Exported for tests that assert
+ *  the registry tracks a spawn and releases it again. */
 export function livePtyCount(): number {
   return livePtys.size;
 }
@@ -461,6 +511,7 @@ export async function attachTerminal(
   // itself size-matched, so it can only agree with the snapshot, never garble.
   entry.subscribers.add(ws);
   entry.lastActivity = Date.now();
+  endRestoreProtection(sessionId); // the operator has arrived
   if (typeof cols === 'number' && typeof rows === 'number' && cols >= 1 && rows >= 1) {
     entry.pty.resize(cols, rows);
     entry.screen.resize(cols, rows);
@@ -494,6 +545,7 @@ export async function writeTermInput(
 ): Promise<void> {
   const entry = await getOrSpawnPty(sessionId, cwd);
   entry.lastActivity = Date.now();
+  endRestoreProtection(sessionId); // the operator has arrived
   const fullText = withImageNotes(text, sessionId, images);
   await entry.writeLock.run(() => typeLine(entry.pty, fullText));
 }
@@ -518,6 +570,7 @@ export function resizeTerm(sessionId: string, cols: number, rows: number): void 
 export async function sendTerminalKey(sessionId: string, cwd: string, key: string): Promise<void> {
   const entry = await getOrSpawnPty(sessionId, cwd);
   entry.lastActivity = Date.now();
+  endRestoreProtection(sessionId); // the operator has arrived
   await entry.writeLock.run(async () => {
     entry.pty.write(key);
   });
@@ -587,7 +640,15 @@ export async function listLiveSessionIds(): Promise<Set<string>> {
  *  path a send or an attach takes, so a restored session is indistinguishable
  *  from one the operator opened by hand. */
 export async function ensureSessionLive(sessionId: string, cwd: string): Promise<void> {
-  await getOrSpawnPty(sessionId, cwd);
+  // Marked before the spawn, so there is no window in which a sweep could
+  // reach the session ahead of its protection.
+  markRestored(sessionId);
+  try {
+    await getOrSpawnPty(sessionId, cwd);
+  } catch (e) {
+    endRestoreProtection(sessionId); // never came up; nothing to protect
+    throw e;
+  }
 }
 
 /** Decode a pasted `data:image/png;base64,...` URI to a temp file and return
@@ -779,6 +840,12 @@ export function spawnSession(
     // yet and may never be (findNewSessionFile below can time out), which is
     // precisely the case that used to leak the process forever.
     registerLivePty(p, cwd, null);
+    // Deregister on EVERY exit path, not just the success one below. This
+    // function can kill the pty and return from several places (cancelled,
+    // identification failed, kickoff typing threw), none of which reach the
+    // onExit registered further down — leaving a dead process in the map for
+    // the sweep to trip over minutes later.
+    p.onExit(() => unregisterLivePty(p));
     // Claimed the instant the process exists, NOT once its session id is
     // known — see spawnSessionOwnershipByCwd's doc comment for why the
     // session id alone is too late to close the race this guards against.
@@ -1020,13 +1087,6 @@ async function findNewSessionFile(
   return null;
 }
 
-/** Close any session PTY that's sat idle (no send through Shepherd) longer
- *  than IDLE_EVICT_MS — the terminal-window equivalent of closing a window
- *  you haven't touched in a while. Skips any session currently pinned
- *  (#73) — e.g. shown in a client's focus-mode card strip — regardless of
- *  how long it's been idle; a session visibly parked in the strip should
- *  never need a respawn just for having been quiet a while. Call once at
- *  daemon startup to start the recurring sweep. */
 /** One pass of the idle sweep, over every pty this daemon holds — not just
  *  the ones that became sessions. Returns what it closed, and is exported so
  *  the policy can be tested without waiting out a real interval. */
@@ -1035,6 +1095,10 @@ export function evictIdlePtys(now: number = Date.now()): string[] {
   for (const [pid, live] of livePtys) {
     const sid = live.sessionId;
     if (sid && isPinned(sid)) continue;
+    // A restored session nobody has reached yet is the whole point of a
+    // startup restore — closing it would strand the operator exactly as if
+    // it had never come back.
+    if (sid && restoredAwaitingTouch.has(sid)) continue;
     const ready = sid ? readyPtys.get(sid) : undefined;
     // An unidentified pty has no lastActivity to consult, so it ages from the
     // moment it spawned. Nothing will ever refresh it — that is the whole
@@ -1044,6 +1108,7 @@ export function evictIdlePtys(now: number = Date.now()): string[] {
     const lastActivity = ready?.lastActivity ?? live.spawnedAt;
     if (now - lastActivity <= IDLE_EVICT_MS) continue;
     livePtys.delete(pid);
+    if (sid) restoredAwaitingTouch.delete(sid);
     if (sid && readyPtys.get(sid)?.pid === pid) readyPtys.delete(sid);
     closed.push(sid ?? `unidentified pid ${pid}`);
     void gracefulClose(live.pty);
@@ -1051,6 +1116,11 @@ export function evictIdlePtys(now: number = Date.now()): string[] {
   return closed;
 }
 
+/** Close any pty that's sat idle longer than IDLE_EVICT_MS — the
+ *  terminal-window equivalent of closing a window you haven't touched in a
+ *  while. Skips sessions pinned by a client (#73, e.g. parked in the
+ *  focus-mode card strip) and sessions a startup restore brought back that
+ *  nobody has reached yet. Call once at daemon startup. */
 export function startIdleEvictionSweep(): void {
   setInterval(() => {
     const closed = evictIdlePtys();
@@ -1070,5 +1140,6 @@ export async function shutdownAllSessions(): Promise<void> {
   const ptys = [...livePtys.values()].map((l) => l.pty);
   livePtys.clear();
   readyPtys.clear();
+  restoredAwaitingTouch.clear();
   await Promise.all(ptys.map((p) => gracefulClose(p)));
 }

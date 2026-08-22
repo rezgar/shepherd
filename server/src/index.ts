@@ -242,6 +242,10 @@ async function main() {
   void restoreSessions(selectRestoreTargets(current.agents, Date.now()), {
     listLiveSessionIds,
     spawn: ensureSessionLive,
+    // Restore runs for minutes; a shutdown in that window must stop it, or it
+    // keeps spawning `claude` processes after shutdownAllSessions has already
+    // emptied the registry and the exit abandons them.
+    isCancelled: () => shuttingDown,
     log: (m) => console.log(m),
   }).catch((e) => console.error('[restore] aborted:', e));
 

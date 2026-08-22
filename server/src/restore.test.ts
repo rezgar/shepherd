@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   selectRestoreTargets,
   restoreSessions,
@@ -225,7 +227,62 @@ describe('restoreSessions', () => {
       },
     });
     expect(consulted).toBe(false);
-    expect(out).toEqual({ restored: [], alreadyLive: [], missingCwd: [], failed: [] });
+    expect(out).toEqual({ restored: [], alreadyLive: [], missingCwd: [], failed: [], cancelled: [] });
+  });
+
+  // A restore runs for minutes starting at daemon boot, which is exactly when
+  // the desktop shell recycles a stale daemon. Without this the loop keeps
+  // spawning processes after shutdown has already emptied the registry, and
+  // the exit abandons them — the same orphan leak this work set out to close.
+  it('stops spawning once the daemon starts shutting down (CoD 7)', async () => {
+    const order: string[] = [];
+    let shuttingDown = false;
+    const out = await restoreSessions(targets('a', 'b', 'c', 'd'), {
+      listLiveSessionIds: async () => new Set<string>(),
+      exists: async () => true,
+      isCancelled: () => shuttingDown,
+      spawn: async (sessionId: string) => {
+        order.push(sessionId);
+        if (sessionId === 'b') shuttingDown = true; // shutdown lands mid-restore
+      },
+    });
+
+    expect(order).toEqual(['a', 'b']);
+    expect(out.restored).toEqual(['a', 'b']);
+    expect(out.cancelled).toEqual(['c', 'd']);
+  });
+
+  it('reports every target as cancelled when shutdown beats the first spawn', async () => {
+    const out = await restoreSessions(targets('a', 'b'), {
+      listLiveSessionIds: async () => new Set<string>(),
+      exists: async () => true,
+      isCancelled: () => true,
+      spawn: async () => {
+        throw new Error('must never spawn during shutdown');
+      },
+    });
+    expect(out.cancelled).toEqual(['a', 'b']);
+    expect(out.restored).toEqual([]);
+  });
+
+  it('treats a path that is a file, not a directory, as a missing cwd (CoD 6)', async () => {
+    // Exercises the real filesystem check, not an injected stub.
+    const order: string[] = [];
+    const out = await restoreSessions(
+      [
+        { sessionId: 'file-not-dir', cwd: fileURLToPath(import.meta.url), lastActivity: NOW },
+        { sessionId: 'real-dir', cwd: path.dirname(fileURLToPath(import.meta.url)), lastActivity: NOW - 1 },
+      ],
+      {
+        listLiveSessionIds: async () => new Set<string>(),
+        spawn: async (sessionId: string) => {
+          order.push(sessionId);
+        },
+      },
+    );
+
+    expect(out.missingCwd).toEqual(['file-not-dir']);
+    expect(order).toEqual(['real-dir']);
   });
 
   it('logs a one-line summary of what happened', async () => {
