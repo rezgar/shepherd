@@ -206,6 +206,71 @@ async function waitForPtyQuiet(idleFor: () => number): Promise<void> {
 /** Live, ready-for-input PTYs, one per session — the actual "terminal
  *  window" a send reuses instead of opening a fresh one each time. */
 const readyPtys = new Map<string, PersistentPty>();
+
+/** One pty this daemon spawned, tracked from the instant the process exists. */
+interface LivePty {
+  pty: IPty;
+  pid: number;
+  cwd: string;
+  /** Set once the session id is known — null for a brand-new session still
+   *  being identified, and null forever for one whose identification failed. */
+  sessionId: string | null;
+  /** When the process started. Stands in for `lastActivity` until the session
+   *  reaches readyPtys, so a pty that never gets identified still ages out
+   *  under the normal idle rule instead of living forever. */
+  spawnedAt: number;
+}
+
+/** EVERY pty this daemon has spawned, keyed by pid — registered the instant
+ *  `pty.spawn` returns, ahead of all the slow, failure-prone work that turns a
+ *  bare process into a usable session.
+ *
+ *  readyPtys alone cannot keep the process table honest. A session only lands
+ *  there once its id is known, and for a brand-new session that means waiting
+ *  out findNewSessionFile's 90-second search — which can fail. When it does,
+ *  the `claude` process is alive and nothing references it: the idle sweep
+ *  iterates readyPtys, so it cannot see the process, which then survives until
+ *  the daemon itself dies. Found in the wild at 3 and 5 days old, ~330MB each,
+ *  against a 10-minute idle rule.
+ *
+ *  Registering here closes that window by construction — a pty is reapable
+ *  from the moment it exists, whether or not it ever becomes a session. */
+const livePtys = new Map<number, LivePty>();
+
+function registerLivePty(p: IPty, cwd: string, sessionId: string | null): void {
+  const pid = p.pid ?? -1;
+  if (pid < 0) return;
+  livePtys.set(pid, { pty: p, pid, cwd, sessionId, spawnedAt: Date.now() });
+}
+
+/** Attach a session id to an already-registered pty, once discovery finds it. */
+function noteLivePtySession(p: IPty, sessionId: string): void {
+  const live = livePtys.get(p.pid ?? -1);
+  if (live) live.sessionId = sessionId;
+}
+
+function unregisterLivePty(p: IPty): void {
+  livePtys.delete(p.pid ?? -1);
+}
+
+/** How many ptys this daemon currently holds. Exported for the startup log
+ *  line and for tests that assert the registry actually tracks a spawn. */
+export function livePtyCount(): number {
+  return livePtys.size;
+}
+
+/** Mark a session active because its transcript just changed on disk.
+ *
+ *  Idle eviction used to advance `lastActivity` only on input sent THROUGH
+ *  Shepherd, which misses the case this whole feature exists for: a session
+ *  driven from phone or web talks to its `claude` process directly over the
+ *  CLI daemon's own pipes, so Shepherd sees nothing and evicts a session the
+ *  operator is mid-conversation with. The transcript file is the one signal
+ *  that catches every turn no matter who drove it. */
+export function noteTranscriptActivity(sessionId: string, at: number = Date.now()): void {
+  const entry = readyPtys.get(sessionId);
+  if (entry) entry.lastActivity = at;
+}
 /** Sessions currently "pinned" by a client — e.g. shown in the focus-mode
  *  card strip (#73) — exempting them from idle eviction regardless of
  *  `lastActivity`. Ref-counted by WS connection (a Set, not a boolean) so
@@ -298,6 +363,9 @@ async function spawnPersistent(sessionId: string, cwd: string): Promise<Persiste
     cwd,
     env: cleanEnv(),
   });
+  // Before any await: from here the process exists, so it must be reapable
+  // even if everything below this line fails.
+  registerLivePty(p, cwd, sessionId);
   const screen = new SessionScreen(INITIAL_COLS, INITIAL_ROWS);
   const subscribers = new Set<FocusWsLike>();
   const idleFor = drainAndTrack(p);
@@ -320,6 +388,7 @@ async function spawnPersistent(sessionId: string, cwd: string): Promise<Persiste
     // NEW live entry out from under it. Dispose THIS pty's own mirror either
     // way: it belongs to the process that just died, not to any respawn.
     if (readyPtys.get(sessionId)?.pid === p.pid) readyPtys.delete(sessionId);
+    unregisterLivePty(p);
     screen.dispose();
   });
   await waitForPtyQuiet(idleFor);
@@ -488,6 +557,37 @@ async function isSessionLiveElsewhere(sessionId: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** Session ids that already have a live interactive process attached, from
+ *  the CLI's own registry — the pre-flight a startup restore runs so it never
+ *  spawns a second `--resume` for a session something else already holds.
+ *
+ *  Interactive only, deliberately. Background-agent entries linger in that
+ *  registry long after their process is gone (entries months old with nothing
+ *  behind them are normal), and counting those as "live" would silently skip
+ *  restoring a session that is not actually running — a failure the operator
+ *  cannot see. Interactive entries are also the ones a `--resume` genuinely
+ *  collides with. */
+export async function listLiveSessionIds(): Promise<Set<string>> {
+  const { stdout } = await pexecFile(resolveClaudeExecutable(), ['agents', '--json'], {
+    timeout: 15_000,
+  });
+  const agents = JSON.parse(stdout) as LiveAgentEntry[];
+  return new Set(
+    agents
+      .filter((a) => a.kind === 'interactive')
+      .map((a) => a.sessionId)
+      .filter((id): id is string => typeof id === 'string'),
+  );
+}
+
+/** Bring a session's pty up if it is not already running, and wait for it to
+ *  be ready. What a startup restore calls per session — deliberately the same
+ *  path a send or an attach takes, so a restored session is indistinguishable
+ *  from one the operator opened by hand. */
+export async function ensureSessionLive(sessionId: string, cwd: string): Promise<void> {
+  await getOrSpawnPty(sessionId, cwd);
 }
 
 /** Decode a pasted `data:image/png;base64,...` URI to a temp file and return
@@ -675,6 +775,10 @@ export function spawnSession(
       return;
     }
     ptyRef = p;
+    // Tracked the instant the process exists — its session id is not known
+    // yet and may never be (findNewSessionFile below can time out), which is
+    // precisely the case that used to leak the process forever.
+    registerLivePty(p, cwd, null);
     // Claimed the instant the process exists, NOT once its session id is
     // known — see spawnSessionOwnershipByCwd's doc comment for why the
     // session id alone is too late to close the race this guards against.
@@ -766,8 +870,10 @@ export function spawnSession(
       });
       p.onExit(() => {
         if (readyPtys.get(found.sessionId)?.pid === p.pid) readyPtys.delete(found.sessionId);
+        unregisterLivePty(p);
         screen.dispose();
       });
+      noteLivePtySession(p, found.sessionId);
       readyPtys.set(found.sessionId, {
         pty: p,
         pid: p.pid ?? -1,
@@ -921,15 +1027,35 @@ async function findNewSessionFile(
  *  how long it's been idle; a session visibly parked in the strip should
  *  never need a respawn just for having been quiet a while. Call once at
  *  daemon startup to start the recurring sweep. */
+/** One pass of the idle sweep, over every pty this daemon holds — not just
+ *  the ones that became sessions. Returns what it closed, and is exported so
+ *  the policy can be tested without waiting out a real interval. */
+export function evictIdlePtys(now: number = Date.now()): string[] {
+  const closed: string[] = [];
+  for (const [pid, live] of livePtys) {
+    const sid = live.sessionId;
+    if (sid && isPinned(sid)) continue;
+    const ready = sid ? readyPtys.get(sid) : undefined;
+    // An unidentified pty has no lastActivity to consult, so it ages from the
+    // moment it spawned. Nothing will ever refresh it — that is the whole
+    // point: a spawn whose session id never resolved is unusable through
+    // Shepherd (it can neither be attached to nor sent input), so letting it
+    // sit is pure leak.
+    const lastActivity = ready?.lastActivity ?? live.spawnedAt;
+    if (now - lastActivity <= IDLE_EVICT_MS) continue;
+    livePtys.delete(pid);
+    if (sid && readyPtys.get(sid)?.pid === pid) readyPtys.delete(sid);
+    closed.push(sid ?? `unidentified pid ${pid}`);
+    void gracefulClose(live.pty);
+  }
+  return closed;
+}
+
 export function startIdleEvictionSweep(): void {
   setInterval(() => {
-    const now = Date.now();
-    for (const [sessionId, entry] of readyPtys) {
-      if (isPinned(sessionId)) continue;
-      if (now - entry.lastActivity > IDLE_EVICT_MS) {
-        readyPtys.delete(sessionId);
-        void gracefulClose(entry.pty);
-      }
+    const closed = evictIdlePtys();
+    if (closed.length) {
+      console.log(`[shepherd] idle-evicted ${closed.length} pty(s): ${closed.join(', ')}`);
     }
   }, EVICT_SWEEP_MS);
 }
@@ -938,7 +1064,11 @@ export function startIdleEvictionSweep(): void {
  *  restarting it (including the supervisor's own auto-restart-on-crash)
  *  doesn't leave orphaned `claude` processes behind. */
 export async function shutdownAllSessions(): Promise<void> {
-  const entries = [...readyPtys.values()];
+  // Every pty, not just the ones that became sessions — livePtys is the
+  // superset, and an unidentified pty left behind here is exactly the orphan
+  // that outlives the daemon and shows up days later still holding memory.
+  const ptys = [...livePtys.values()].map((l) => l.pty);
+  livePtys.clear();
   readyPtys.clear();
-  await Promise.all(entries.map((e) => gracefulClose(e.pty)));
+  await Promise.all(ptys.map((p) => gracefulClose(p)));
 }
