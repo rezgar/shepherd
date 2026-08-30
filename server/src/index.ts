@@ -5,7 +5,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { WebSocketServer, type WebSocket } from 'ws';
 import chokidar from 'chokidar';
 import { scanAll, PROJECTS_DIR } from './scan.js';
-import { parseTranscript } from './transcript.js';
+import { parseTranscriptInWorker } from './rawParsePool.js';
 import { attachTerminal, detachTerminal, writeTermInput, resizeTerm, sendTerminalKey, spawnSession, startIdleEvictionSweep, shutdownAllSessions, pinSession, unpinSession, unpinAllForConnection, noteTranscriptActivity, listLiveSessionIds, ensureSessionLive } from './sender.js';
 import { selectRestoreTargets, restoreSessions } from './restore.js';
 import { computeLimits, type Limits } from './usage.js';
@@ -281,7 +281,7 @@ async function main() {
   const sendWindow = async (ws: FocusWs, before?: number) => {
     if (!ws.focusFile || !ws.focusSession) return;
     try {
-      const parsed = await parseTranscript(ws.focusFile, ws.focusSession);
+      const parsed = await parseTranscriptInWorker(ws.focusFile, ws.focusSession);
       const all = parsed.messages;
       const total = all.length;
       if (typeof before === 'number') {
@@ -357,7 +357,7 @@ async function main() {
   const sendSubagentWindow = async (ws: FocusWs) => {
     if (!ws.focusSubagentFile || !ws.focusSubagentId) return;
     try {
-      const parsed = await parseTranscript(ws.focusSubagentFile, ws.focusSubagentId);
+      const parsed = await parseTranscriptInWorker(ws.focusSubagentFile, ws.focusSubagentId);
       if (ws.readyState === 1)
         ws.send(JSON.stringify({ type: 'subagentTranscript', agentId: ws.focusSubagentId, messages: parsed.messages }));
     } catch (e) {
