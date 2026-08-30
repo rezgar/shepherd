@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import os from 'node:os';
 import path from 'node:path';
 import { parseSessionRaw, type RawSession } from './parse.js';
+import { parseTranscript as parseTranscriptDirect, type Transcript } from './transcript.js';
 
 /** Runs parseSessionRaw (the expensive read+parse half of session parsing,
  *  see parse.ts) in worker_threads instead of the daemon's main thread —
@@ -19,7 +20,20 @@ import { parseSessionRaw, type RawSession } from './parse.js';
  *  missing, worker_threads unavailable, whatever), every call transparently
  *  falls back to running parseSessionRaw in-process — same as before this
  *  file existed. A worker dying mid-flight rejects only ITS in-flight
- *  requests and gets respawned; it never takes down scanning. */
+ *  requests and gets respawned; it never takes down scanning.
+ *
+ *  #123 extended this pool to also cover parseTranscript (the *focused*
+ *  session's full chat view, in transcript.ts) — confirmed live: that path
+ *  did its own unbounded main-thread `readFile` + full-file JSON.parse with
+ *  NO worker isolation and no size cap, so a session whose transcript grows
+ *  into the hundreds of MB (an actively-open one hit 245MB) repeatedly OOM'd
+ *  the daemon's *main* thread the instant it was focused — and since the
+ *  web client re-sends `focus` for the last-focused session the moment it
+ *  reconnects, "Restart daemon" just re-triggered the identical crash within
+ *  seconds. As with parse() below, only an OOM'd worker skips the in-process
+ *  fallback (degrading to an empty transcript instead) — an OOM proves the
+ *  file itself is too large for any thread's default heap, so retrying
+ *  in-process would repeat the exact crash this exists to prevent. */
 
 /** Directory this module itself lives in, in a way that works in BOTH
  *  environments this file runs in — confirmed by actually running the
@@ -49,7 +63,11 @@ function resolveWorkerPath(): string {
 }
 
 interface PendingRequest {
-  resolve: (raw: RawSession | null) => void;
+  // Shared by both parse() (resolves RawSession | null) and parseTranscript()
+  // (resolves Transcript) — untyped here so each call site's own Promise<T>
+  // generic drives the actual resolve type without a function-parameter
+  // variance clash between the two unrelated result shapes.
+  resolve: (result: any) => void;
   reject: (err: Error) => void;
 }
 
@@ -82,12 +100,12 @@ class RawParsePool {
     // memory pressure of its own, without changing the outcome for any
     // normal-sized transcript.
     const worker = new Worker(resolveWorkerPath(), { resourceLimits: { maxOldGenerationSizeMb: 512 } });
-    worker.on('message', (msg: { id: number; raw?: RawSession | null; error?: string }) => {
+    worker.on('message', (msg: { id: number; raw?: RawSession | null; transcript?: Transcript; error?: string }) => {
       const req = this.pending.get(msg.id);
       if (!req) return; // late reply for a request already settled some other way
       this.pending.delete(msg.id);
       if (msg.error) req.reject(new Error(msg.error));
-      else req.resolve(msg.raw ?? null);
+      else req.resolve(msg.raw ?? msg.transcript ?? null);
     });
     const onDead = (err?: Error) => {
       // Every request still waiting on THIS worker can never get a reply —
@@ -154,6 +172,43 @@ class RawParsePool {
       return parseSessionRaw(file);
     });
   }
+
+  async parseTranscript(file: string, sessionId: string): Promise<Transcript> {
+    const empty: Transcript = { type: 'transcript', sessionId, file, messages: [], activeSubagents: [] };
+    // Pool truly unavailable (worker_threads itself unusable) — no isolation
+    // exists anywhere on this machine, so falling back in-process is no
+    // worse than the pre-#123 behavior for every caller of this function.
+    if (this.disabled) return parseTranscriptDirect(file, sessionId).catch(() => empty);
+    const alive = this.workers.filter((w): w is Worker => !!w);
+    if (!alive.length) return parseTranscriptDirect(file, sessionId).catch(() => empty);
+    const worker = alive[this.nextWorker % alive.length];
+    this.nextWorker++;
+
+    const id = this.nextId++;
+    return new Promise<RawSession | Transcript | null>((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      worker.postMessage({ id, kind: 'transcript', file, sessionId });
+    }).then(
+      (t) => (t as Transcript) ?? empty,
+      (e) => {
+        // A worker OOM proves the file itself is too large to parse safely
+        // on ANY thread's default heap — unlike parse() above, this never
+        // falls back to an in-process retry, because that retry is exactly
+        // the unbounded main-thread read+parse #123 exists to eliminate.
+        if (e instanceof Error && (e as NodeJS.ErrnoException).code === 'ERR_WORKER_OUT_OF_MEMORY') {
+          console.error('[rawParsePool] worker OOM parsing transcript', file, '— returning empty (too large to parse safely)');
+          return empty;
+        }
+        // Any other worker-side failure (crash, unexpected error) is
+        // unrelated to file size — falls back to an in-process parse for
+        // THIS file, same as parse() above, rather than silently blanking
+        // out every focused session's chat view over an unrelated worker
+        // hiccup.
+        console.error('[rawParsePool] worker transcript parse failed, falling back in-process', file, e);
+        return parseTranscriptDirect(file, sessionId).catch(() => empty);
+      },
+    );
+  }
 }
 
 /** Small pool, not one-per-core — this is occasional bursty work (only
@@ -173,4 +228,8 @@ function getPool(): RawParsePool {
 
 export async function parseRawInWorker(file: string): Promise<RawSession | null> {
   return getPool().parse(file);
+}
+
+export async function parseTranscriptInWorker(file: string, sessionId: string): Promise<Transcript> {
+  return getPool().parseTranscript(file, sessionId);
 }
