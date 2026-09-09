@@ -22,8 +22,19 @@ export function resolveClaudeExecutable(): string {
     cachedExe = isWin
       ? path.join(path.dirname(out), 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe')
       : out;
+    return cachedExe;
   } catch {
-    cachedExe = isWin ? 'claude.exe' : 'claude';
+    // Deliberately NOT cached: `where`/`which` can fail from a purely
+    // transient environment hiccup (nvm switching the active Node version
+    // out from under PATH, a Windows Update resetting shell/session state,
+    // etc.) that clears itself well before this long-running daemon exits.
+    // Caching the fallback here would mean the first such hiccup poisons
+    // every terminal/askdiff spawn for the rest of the daemon's life — the
+    // bare 'claude.exe'/'claude' below is unresolvable via node-pty's own
+    // PATH search (Windows: conpty.cc throws "File not found: " with an
+    // EMPTY path when its SearchPath comes up empty), so once wedged it
+    // fails identically forever, even after a plain terminal would already
+    // work again. Returning without caching lets the very next call retry.
+    return isWin ? 'claude.exe' : 'claude';
   }
-  return cachedExe;
 }
