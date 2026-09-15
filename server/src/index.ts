@@ -227,27 +227,36 @@ async function main() {
   httpServer.listen(PORT, () => {
     console.log(`[shepherd] ws://localhost:${PORT} (v${DAEMON_VERSION}) — watching ${PROJECTS_DIR}`);
     console.log(`[shepherd] ${current.agents.length} agents at boot`);
+
+    // Bring back what was recently in use. A session is only reachable from
+    // phone or web while its process is alive, so after an unattended reboot
+    // there is nothing to connect to and — being remote — nobody who can click
+    // to start one. Deliberately not awaited: it is minutes of sequential cold
+    // starts, and the daemon must serve clients throughout.
+    //
+    // Started only once the bind is confirmed, not right after calling
+    // listen(): listen() is async, and starting restore unconditionally
+    // right after the call used to fire off real `claude --resume` spawns
+    // before the bind even succeeded. On a crash-loop, a doomed attempt
+    // races the previous one for the port, hits EADDRINUSE, and exits via
+    // process.exit(1) below with no chance to cancel restore first — so it
+    // still finished its spawns and abandoned them as orphans once it died.
+    // A daemon that never actually binds now never starts restore at all.
+    void restoreSessions(selectRestoreTargets(current.agents, Date.now()), {
+      listLiveSessionIds,
+      spawn: ensureSessionLive,
+      // Restore runs for minutes; a shutdown in that window must stop it, or it
+      // keeps spawning `claude` processes after shutdownAllSessions has already
+      // emptied the registry and the exit abandons them.
+      isCancelled: () => shuttingDown,
+      log: (m) => console.log(m),
+    }).catch((e) => console.error('[restore] aborted:', e));
   });
   // In-flight sends this daemon spawned, by session id — lets Esc cancel one.
   const inFlight = new Map<string, { cancel: () => void }>();
 
   startIdleEvictionSweep();
   startAskdiffIdleEvictionSweep();
-
-  // Bring back what was recently in use. A session is only reachable from
-  // phone or web while its process is alive, so after an unattended reboot
-  // there is nothing to connect to and — being remote — nobody who can click
-  // to start one. Deliberately not awaited: it is minutes of sequential cold
-  // starts, and the daemon must serve clients throughout.
-  void restoreSessions(selectRestoreTargets(current.agents, Date.now()), {
-    listLiveSessionIds,
-    spawn: ensureSessionLive,
-    // Restore runs for minutes; a shutdown in that window must stop it, or it
-    // keeps spawning `claude` processes after shutdownAllSessions has already
-    // emptied the registry and the exit abandons them.
-    isCancelled: () => shuttingDown,
-    log: (m) => console.log(m),
-  }).catch((e) => console.error('[restore] aborted:', e));
 
   const broadcast = () => {
     const data = JSON.stringify(current);
