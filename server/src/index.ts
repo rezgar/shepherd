@@ -6,7 +6,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import chokidar from 'chokidar';
 import { scanAll, PROJECTS_DIR } from './scan.js';
 import { parseTranscriptInWorker } from './rawParsePool.js';
-import { attachTerminal, detachTerminal, writeTermInput, resizeTerm, sendTerminalKey, spawnSession, startIdleEvictionSweep, shutdownAllSessions, pinSession, unpinSession, unpinAllForConnection, noteTranscriptActivity, listLiveSessionIds, ensureSessionLive } from './sender.js';
+import { attachTerminal, detachTerminal, writeTermInput, resizeTerm, sendTerminalKey, spawnSession, startIdleEvictionSweep, shutdownAllSessions, pinSession, unpinSession, unpinAllForConnection, noteTranscriptActivity, listLiveSessionIds, ensureSessionLive, RESTORE_PROTECTION_REBOOT_MS, RESTORE_PROTECTION_SAME_BOOT_MS } from './sender.js';
 import { selectRestoreTargets, restoreSessions } from './restore.js';
 import { computeLimits, type Limits } from './usage.js';
 import { listDir } from './browse.js';
@@ -242,9 +242,31 @@ async function main() {
     // process.exit(1) below with no chance to cancel restore first — so it
     // still finished its spawns and abandoned them as orphans once it died.
     // A daemon that never actually binds now never starts restore at all.
+    //
+    // A restored session gets a 24h idle-eviction exemption so a remote
+    // operator has time to reach it after the machine came back from an
+    // actual power cut — but restoreSessions runs on every successful boot,
+    // not just one that followed a reboot. os.uptime() (the OS's own uptime,
+    // not this process's) is what tells the two apart: small means the
+    // machine really did just start, large means only the daemon recycled
+    // (a crash-loop, or the desktop shell replacing a stale daemon after an
+    // update) while the machine — and the operator's ability to just walk up
+    // to it — never went anywhere. Getting this wrong in the "large" case
+    // used to re-arm the full 24h grace on the same handful of sessions
+    // every time an unstable daemon restarted, so a day-old session an
+    // operator was long done with kept reading as live in a remote client
+    // for as long as the instability kept recurring (#129).
+    const REBOOT_UPTIME_THRESHOLD_S = 10 * 60;
+    const uptimeS = os.uptime();
+    const isPostReboot = uptimeS < REBOOT_UPTIME_THRESHOLD_S;
+    const restoreProtectionMs = isPostReboot ? RESTORE_PROTECTION_REBOOT_MS : RESTORE_PROTECTION_SAME_BOOT_MS;
+    console.log(
+      `[restore] system uptime ${Math.round(uptimeS / 60)}m — ` +
+        `${isPostReboot ? 'looks like a real reboot: 24h' : 'daemon-only restart: 15m'} idle-eviction exemption for restored sessions`,
+    );
     void restoreSessions(selectRestoreTargets(current.agents, Date.now()), {
       listLiveSessionIds,
-      spawn: ensureSessionLive,
+      spawn: (sessionId, cwd) => ensureSessionLive(sessionId, cwd, restoreProtectionMs),
       // Restore runs for minutes; a shutdown in that window must stop it, or it
       // keeps spawning `claude` processes after shutdownAllSessions has already
       // emptied the registry and the exit abandons them.

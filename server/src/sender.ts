@@ -265,7 +265,8 @@ function registerLivePty(p: IPty, cwd: string, sessionId: string | null): void {
 }
 
 /** Sessions brought back by a startup restore that nobody has touched yet —
- *  exempt from idle eviction until they are.
+ *  exempt from idle eviction until they are, or until their protection window
+ *  (see markRestored) lapses.
  *
  *  Without this the feature undoes itself. A restored session is idle BY
  *  DESIGN (it comes back warm and waiting, it does not resume working), so
@@ -276,11 +277,16 @@ function registerLivePty(p: IPty, cwd: string, sessionId: string | null): void {
  *
  *  The exemption is per-session and lifts on first contact, so the cost is
  *  bounded: at most RESTORE_MAX sessions held until the operator actually
- *  arrives, after which they age out under the normal rule like any other. */
+ *  arrives, after which they age out under the normal rule like any other.
+ *
+ *  Stores the protection's expiry (ms epoch), not the mark time — that's what
+ *  lets markRestored take a caller-supplied duration (see
+ *  RESTORE_PROTECTION_REBOOT_MS vs RESTORE_PROTECTION_SAME_BOOT_MS) without
+ *  isRestoreProtected needing to know which one applied. */
 const restoredAwaitingTouch = new Map<string, number>();
 
 /** How long a restored session may sit untouched before the normal idle rule
- *  takes over again.
+ *  takes over again, when the restore followed a genuine machine reboot.
  *
  *  The exemption has to outlast a night — power returning at 03:00 with the
  *  operator arriving at 08:00 is the scenario this whole feature exists for —
@@ -291,19 +297,41 @@ const restoredAwaitingTouch = new Map<string, number>();
  *  processes pinned for the daemon's lifetime. 24h matches the window that
  *  made the session restorable in the first place: if it has been a day, it
  *  would no longer qualify for restore either. */
-const RESTORE_PROTECTION_MS = 24 * 3_600_000;
+export const RESTORE_PROTECTION_REBOOT_MS = 24 * 3_600_000;
 
-/** Protect a session the startup restore just brought back. */
-function markRestored(sessionId: string): void {
-  restoredAwaitingTouch.set(sessionId, Date.now());
+/** How long a restored session may sit untouched when the restore did NOT
+ *  follow a reboot — the daemon itself restarted (a crash-loop, or the
+ *  desktop shell recycling a stale daemon after an app update) while the
+ *  machine, and the operator's ability to just walk up to it, never actually
+ *  went away.
+ *
+ *  The 24h grace exists solely for "the operator is remote and the machine
+ *  just came back from a power cut" — applying it here too means every
+ *  ordinary daemon restart quietly resurrects whatever was used in the last
+ *  day and keeps it alive, indistinguishable from a real live session, for up
+ *  to 24h even though nobody was ever stranded. Confirmed as the cause of old
+ *  sessions still reading as active in a remote client a day after the
+ *  operator was done with them (#129): a daemon that restarts more than once
+ *  a day — exactly what an unstable one does — re-arms the SAME 24h window
+ *  on up to RESTORE_MAX sessions every single time. Long enough to survive
+ *  restore's own spawn/quiet-wait startup window (tens of seconds, see
+ *  START_TIMEOUT_MS), short enough to clear on the very next idle sweep once
+ *  it does. */
+export const RESTORE_PROTECTION_SAME_BOOT_MS = 15 * 60_000;
+
+/** Protect a session the startup restore just brought back for `protectionMs`
+ *  — see RESTORE_PROTECTION_REBOOT_MS / RESTORE_PROTECTION_SAME_BOOT_MS for
+ *  which one a caller should pass. */
+function markRestored(sessionId: string, protectionMs: number): void {
+  restoredAwaitingTouch.set(sessionId, Date.now() + protectionMs);
 }
 
 /** Whether this session is still inside its post-restore grace. A pure read —
  *  pruning lapsed entries is the sweep's job, so that asking the question can
  *  never change the answer. */
 function isRestoreProtected(sessionId: string, now: number): boolean {
-  const markedAt = restoredAwaitingTouch.get(sessionId);
-  return markedAt !== undefined && now - markedAt <= RESTORE_PROTECTION_MS;
+  const expiresAt = restoredAwaitingTouch.get(sessionId);
+  return expiresAt !== undefined && now <= expiresAt;
 }
 
 /** Drop the restore exemption — the operator has arrived, so normal idle
@@ -681,8 +709,17 @@ export async function listLiveSessionIds(): Promise<Set<string>> {
 /** Bring a session's pty up if it is not already running, and wait for it to
  *  be ready. What a startup restore calls per session — deliberately the same
  *  path a send or an attach takes, so a restored session is indistinguishable
- *  from one the operator opened by hand. */
-export async function ensureSessionLive(sessionId: string, cwd: string): Promise<boolean> {
+ *  from one the operator opened by hand.
+ *
+ *  `protectionMs` defaults to the reboot-grade window: existing callers (and
+ *  every test) that don't pass one keep today's behavior. The caller that
+ *  actually knows whether this boot followed a real reboot — index.ts's own
+ *  restore wiring, via os.uptime() — passes the shorter one explicitly. */
+export async function ensureSessionLive(
+  sessionId: string,
+  cwd: string,
+  protectionMs: number = RESTORE_PROTECTION_REBOOT_MS,
+): Promise<boolean> {
   // Only a session this restore actually brings up earns the exemption.
   // getOrSpawnPty happily returns an already-live pty, and the live-session
   // pre-flight is a single snapshot taken minutes earlier — so by the time
@@ -697,7 +734,7 @@ export async function ensureSessionLive(sessionId: string, cwd: string): Promise
   if (readyPtys.has(sessionId)) return false;
   // Marked before the spawn, so there is no window in which a sweep could
   // reach the session ahead of its protection.
-  markRestored(sessionId);
+  markRestored(sessionId, protectionMs);
   try {
     await getOrSpawnPty(sessionId, cwd);
     return true;
@@ -1153,7 +1190,8 @@ export function evictIdlePtys(now: number = Date.now()): string[] {
     if (sid && isPinned(sid)) continue;
     // A restored session nobody has reached yet is the whole point of a
     // startup restore — closing it would strand the operator exactly as if
-    // it had never come back. Bounded: see RESTORE_PROTECTION_MS.
+    // it had never come back. Bounded: see RESTORE_PROTECTION_REBOOT_MS /
+    // RESTORE_PROTECTION_SAME_BOOT_MS.
     if (sid) {
       if (isRestoreProtected(sid, now)) continue;
       restoredAwaitingTouch.delete(sid); // grace lapsed, or was never held
