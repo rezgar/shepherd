@@ -70,6 +70,7 @@ const {
   ensureSessionLive,
   isAwaitingFirstTouch,
   writeTermInput,
+  RESTORE_PROTECTION_SAME_BOOT_MS,
 } = await import('./sender.js');
 
 const IDLE_EVICT_MS = 10 * 60_000;
@@ -281,5 +282,28 @@ describe('a restored session survives until someone reaches it (CoD 9)', () => {
     // Past it: back under the ordinary idle rule.
     expect(isAwaitingFirstTouch(id, restoredAt + 25 * 3_600_000)).toBe(false);
     expect(evictIdlePtys(restoredAt + 25 * 3_600_000)).toEqual([id]);
+  });
+
+  // #129: restoreSessions runs on every successful boot, not just one that
+  // followed a real reboot — a crash-loop or an update recycle calls the
+  // exact same path. index.ts tells the two apart via os.uptime() and passes
+  // a much shorter protectionMs when the machine was already up, so an
+  // unstable daemon stops re-arming a full day of exemption on sessions
+  // nobody asked to see again.
+  it('accepts a shorter exemption for a restore that did not follow a reboot', async () => {
+    const id = sid('restored');
+    await ensureSessionLive(id, 'C:/repo', RESTORE_PROTECTION_SAME_BOOT_MS);
+    const restoredAt = Date.now();
+
+    // Well inside the short grace (margins wide enough to absorb the spawn's
+    // own real elapsed time, same as the 12h/25h margins above do against
+    // the 24h case).
+    expect(isAwaitingFirstTouch(id, restoredAt + 5 * 60_000)).toBe(true);
+    expect(evictIdlePtys(restoredAt + 5 * 60_000)).toEqual([]);
+
+    // Well past it — nowhere near the 24h reboot grace, unlike the default
+    // case above.
+    expect(isAwaitingFirstTouch(id, restoredAt + 20 * 60_000)).toBe(false);
+    expect(evictIdlePtys(restoredAt + 20 * 60_000)).toEqual([id]);
   });
 });
