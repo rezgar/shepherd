@@ -244,6 +244,7 @@ export interface RawSession {
   repoPath: string;
   label: string;
   stage: Stage;
+  everHadRemoteControl: boolean;
 }
 
 /**
@@ -277,6 +278,15 @@ export async function parseSessionRaw(file: string): Promise<RawSession | null> 
   let lastEventKind = '';
   const stageSignals: Stage[] = [];
   let taskItems: TaskItem[] = [];
+  // Set once a `/remote-control is active` system event has ever appeared —
+  // Claude Code writes one every time a process for this session starts up
+  // with Remote Control on, and never writes a corresponding "now
+  // disconnected" event (it drops silently by design). So this can only ever
+  // prove "a phone/browser could reach this session at some point," never
+  // "it's connected right now" — but that's exactly what restore-selection
+  // needs: a session this was never true for gets no benefit from being
+  // resurrected, see selectRestoreTargets.
+  let everHadRemoteControl = false;
 
   // Snapshot read (not a streaming follow) so a live, growing transcript can't
   // stall the scan.
@@ -318,6 +328,9 @@ export async function parseSessionRaw(file: string): Promise<RawSession | null> 
       case 'queue-operation':
         if (o.operation === 'enqueue') queued++;
         else queued = Math.max(0, queued - 1);
+        break;
+      case 'system':
+        if (o.subtype === 'bridge_status') everHadRemoteControl = true;
         break;
       case 'user': {
         // A subagent's completion notice, delivered as a "user" event — not
@@ -409,6 +422,7 @@ export async function parseSessionRaw(file: string): Promise<RawSession | null> 
     repoPath,
     label,
     stage,
+    everHadRemoteControl,
   };
 }
 
@@ -444,6 +458,7 @@ export function classifySession(raw: RawSession, now: number, hook?: HookState):
     repoPath,
     label,
     stage,
+    everHadRemoteControl,
   } = raw;
 
   const idleMs = lastTs > 0 ? now - lastTs : Number.MAX_SAFE_INTEGER;
@@ -586,6 +601,7 @@ export function classifySession(raw: RawSession, now: number, hook?: HookState):
     queued,
     file,
     taskLine: computeTaskLine(taskItems),
+    everHadRemoteControl,
   };
 }
 

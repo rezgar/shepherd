@@ -53,6 +53,14 @@ export interface AgentModel {
   file: string;
   /** Done/current/next task tracking, if the session used TodoWrite/TaskCreate. */
   taskLine?: TaskLine;
+  /** Whether a `/remote-control is active` system event has ever appeared in
+   *  this session's transcript — Claude Code writes one whenever a process
+   *  for it starts up with Remote Control on, and never writes a
+   *  corresponding "now disconnected" one (it drops silently by design), so
+   *  this can only prove "a phone/browser could reach this at some point,"
+   *  never "it's connected right now." That's what restore-selection needs:
+   *  see selectRestoreTargets in restore.ts. */
+  everHadRemoteControl: boolean;
 }
 
 export interface Snapshot {
