@@ -24,7 +24,18 @@ export interface RestoreTarget {
 }
 
 /** The sessions a startup restore should bring back: those with real
- *  conversation activity inside the window, most recent first, capped.
+ *  conversation activity inside the window AND that Remote Control was ever
+ *  turned on for, most recent first, capped.
+ *
+ *  The whole point of restoring a session is being reachable from a phone or
+ *  browser — a session Remote Control was never enabled for gets no benefit
+ *  from being resurrected, since nothing could ever have reached it that way
+ *  either. everHadRemoteControl only proves "at some point," never
+ *  "currently" (Claude Code drops Remote Control silently, with no
+ *  corresponding local record of a disconnect — see AgentModel's doc
+ *  comment), but that is exactly the question restore can answer: the
+ *  process is already gone by the time this runs, so "was it ever true" is
+ *  the only thing left to ask (#131).
  *
  *  Pure on purpose — the whole selection policy is decidable from a snapshot
  *  and a clock, with no processes, filesystem or daemon state involved, which
@@ -57,6 +68,7 @@ export function selectRestoreTargets(
 
   return [...freshest.values()]
     .filter((a) => now - a.lastActivity <= windowMs)
+    .filter((a) => a.everHadRemoteControl)
     .sort((a, b) => b.lastActivity - a.lastActivity)
     .slice(0, max)
     .map((a) => ({ sessionId: a.sessionId, cwd: a.cwd, lastActivity: a.lastActivity }));

@@ -13,7 +13,12 @@ import type { AgentModel } from './types.js';
 const NOW = 1_800_000_000_000;
 const HOUR = 3_600_000;
 
-function agent(sessionId: string, agoHours: number, cwd = `C:/repo/${sessionId}`): AgentModel {
+function agent(
+  sessionId: string,
+  agoHours: number,
+  cwd = `C:/repo/${sessionId}`,
+  everHadRemoteControl = true,
+): AgentModel {
   return {
     sessionId,
     product: 'repo',
@@ -32,6 +37,7 @@ function agent(sessionId: string, agoHours: number, cwd = `C:/repo/${sessionId}`
     createdAt: NOW - agoHours * HOUR,
     queued: 0,
     file: `C:/projects/${sessionId}.jsonl`,
+    everHadRemoteControl,
   };
 }
 
@@ -102,6 +108,21 @@ describe('selectRestoreTargets', () => {
 
   it('returns nothing when every session is stale (CoD 2)', () => {
     expect(selectRestoreTargets([agent('old', 48), agent('older', 100)], NOW)).toEqual([]);
+  });
+
+  // #131: restoring a session Remote Control was never turned on for serves
+  // nobody — no phone or browser could ever have reached it, restored or
+  // not — even though its ordinary transcript activity looks just as fresh
+  // as a session that IS reachable that way.
+  it('skips a recently-active session Remote Control was never turned on for (#131)', () => {
+    const neverBridged = agent('local-only', 1, undefined, false);
+    const bridged = agent('bridged', 1, undefined, true);
+    const picked = selectRestoreTargets([neverBridged, bridged], NOW);
+    expect(picked.map((t) => t.sessionId)).toEqual(['bridged']);
+  });
+
+  it('returns nothing when the only fresh session was never Remote Control-reachable', () => {
+    expect(selectRestoreTargets([agent('local-only', 1, undefined, false)], NOW)).toEqual([]);
   });
 
   // Regression: found by the end-to-end restore test, which spawned two
