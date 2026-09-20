@@ -91,7 +91,7 @@ const FIND_NEW_SESSION_TIMEOUT_MS = 90_000;
  *  value, and NaN poisons the comparison in the wrong direction: `x <= NaN`
  *  is false, so the sweep would stop skipping and close every pty on its
  *  first pass. A typo in an env var must not silently kill live sessions. */
-function msFromEnv(name: string, fallback: number): number {
+export function msFromEnv(name: string, fallback: number): number {
   const raw = process.env[name];
   if (raw === undefined) return fallback;
   const n = Number(raw);
