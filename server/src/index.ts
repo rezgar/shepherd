@@ -6,7 +6,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import chokidar from 'chokidar';
 import { scanAll, PROJECTS_DIR } from './scan.js';
 import { parseTranscriptInWorker } from './rawParsePool.js';
-import { attachTerminal, detachTerminal, writeTermInput, resizeTerm, sendTerminalKey, spawnSession, startIdleEvictionSweep, shutdownAllSessions, pinSession, unpinSession, unpinAllForConnection, noteTranscriptActivity, listLiveSessionIds, ensureSessionLive, RESTORE_PROTECTION_REBOOT_MS, RESTORE_PROTECTION_SAME_BOOT_MS } from './sender.js';
+import { attachTerminal, detachTerminal, writeTermInput, resizeTerm, sendTerminalKey, spawnSession, startIdleEvictionSweep, shutdownAllSessions, pinSession, unpinSession, unpinAllForConnection, noteTranscriptActivity, listLiveSessionIds, ensureSessionLive, RESTORE_PROTECTION_REBOOT_MS, RESTORE_PROTECTION_SAME_BOOT_MS, msFromEnv } from './sender.js';
 import { selectRestoreTargets, restoreSessions } from './restore.js';
 import { computeLimits, type Limits } from './usage.js';
 import { listDir } from './browse.js';
@@ -42,6 +42,13 @@ const PORT = Number(process.env.SHEPHERD_PORT ?? 4177);
  *  whether a still-running daemon is stale after an app update and must be
  *  recycled (see desktop/main.cjs `ensureDaemon`). `dev` when run standalone. */
 const DAEMON_VERSION = process.env.SHEPHERD_VERSION ?? 'dev';
+
+/** How often to re-read the account's /usage numbers. Every refresh spawns a
+ *  pty and every pty spawn permanently leaks a socket handle on Windows
+ *  ConPTY, so this interval IS the leak rate — see the comment at the
+ *  refreshLimits interval below. Overridable by env, same escape hatch as
+ *  SHEPHERD_IDLE_EVICT_MS. */
+const LIMITS_REFRESH_MS = msFromEnv('SHEPHERD_LIMITS_REFRESH_MS', 30 * 60_000);
 
 const STATE_ORDER = { error: 0, 'needs-you': 1, working: 2, idle: 3 } as const;
 
@@ -295,6 +302,21 @@ async function main() {
   // usage.ts) — far too heavy to run on every rescan (400ms debounce); a
   // slow independent poll is plenty for numbers that barely move minute to
   // minute.
+  //
+  // Every one of those spawns costs a PERMANENTLY leaked socket handle: on
+  // Windows ConPTY node-pty does not release the handle backing a pty even
+  // when the child is killed and its `onExit` has been awaited (measured —
+  // exit fires in ~78ms and the handle leaks regardless), so the retirement
+  // path cannot fix it and the spawn rate is the only lever there is. At the
+  // original 5 minutes that was ~12 leaked handles an hour for as long as the
+  // daemon lived; the pre-fix daemon log shows the floor climbing 2 -> 99 over
+  // one ~8h boot. Thirty minutes cuts the bleed 6x.
+  //
+  // The cost is bounded and small: these are two percentage bars with a reset
+  // countdown (LimitsTracker.tsx). A session window resets on a multi-hour
+  // cadence and a weekly one on multi-day, so the numbers move by a percent or
+  // two across half an hour — nothing a human reads differently. Overridable
+  // by env for anyone who wants it tighter, or effectively off.
   const refreshLimits = async () => {
     try {
       currentLimits = await computeLimits();
@@ -304,7 +326,7 @@ async function main() {
     }
   };
   void refreshLimits();
-  setInterval(refreshLimits, 5 * 60_000);
+  setInterval(refreshLimits, LIMITS_REFRESH_MS);
 
   const LIMIT = 30;
   // Send a recent window of the focused transcript (fast first paint), or an
