@@ -4,6 +4,7 @@ import { readdir, stat } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { classifySession, type RawSession } from './parse.js';
+import { isMachineIssued } from './machineIssued.js';
 import { parseRawInWorker } from './rawParsePool.js';
 import { readHookStates } from './hookState.js';
 import type { AgentModel } from './types.js';
@@ -188,8 +189,15 @@ export async function scanAll(now: number): Promise<AgentModel[]> {
       return classifySession(raw, now, hooks.get(path.basename(file, '.jsonl')));
     }),
   );
+  // Machine-issued sessions are dropped HERE, in the one list that feeds both
+  // the card strip and restore selection (index.ts hands `current.agents` to
+  // selectRestoreTargets). Filtering in the UI instead would let restore keep
+  // resurrecting sessions no card ever shows — which is exactly what happened
+  // pre-#132, when six `aic.sh` commit-message sessions were brought back on
+  // boot with nobody able to see or reach them.
   const recent = models.filter(
-    (m): m is AgentModel => m !== null && now - m.lastActivity <= RECENT_WINDOW_MS,
+    (m): m is AgentModel =>
+      m !== null && now - m.lastActivity <= RECENT_WINDOW_MS && !isMachineIssued(m, now),
   );
   await enrich(recent);
   return recent;

@@ -61,6 +61,13 @@ export interface AgentModel {
    *  never "it's connected right now." That's what restore-selection needs:
    *  see selectRestoreTargets in restore.ts. */
   everHadRemoteControl: boolean;
+  /** Turns genuinely put to the model (tool results, interrupt notices and
+   *  the PTY driver's own slash-command echoes excluded), and tool calls made
+   *  in reply. Together they distinguish a one-shot tool invocation — `aic.sh`
+   *  asking for a commit message, say — from a session a person actually used;
+   *  see machineIssued.ts. */
+  userTurns: number;
+  toolUses: number;
 }
 
 export interface Snapshot {

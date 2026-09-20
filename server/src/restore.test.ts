@@ -38,6 +38,10 @@ function agent(
     queued: 0,
     file: `C:/projects/${sessionId}.jsonl`,
     everHadRemoteControl,
+    // A real conversation, so these fixtures are never mistaken for the
+    // one-shot machine-issued sessions machineIssued.ts filters out.
+    userTurns: 5,
+    toolUses: 3,
   };
 }
 

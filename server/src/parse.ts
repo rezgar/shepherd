@@ -245,6 +245,8 @@ export interface RawSession {
   label: string;
   stage: Stage;
   everHadRemoteControl: boolean;
+  userTurns: number;
+  toolUses: number;
 }
 
 /**
@@ -272,6 +274,11 @@ export async function parseSessionRaw(file: string): Promise<RawSession | null> 
   let lastAssistantText = '';
   let lastAssistantStop: string | null = null;
   let lastToolName = '';
+  /** Turns genuinely put to the model, and tool calls made in reply — the two
+   *  numbers machineIssued.ts needs to tell a one-shot tool invocation
+   *  (`aic.sh` asking for a commit message) from a session a person used. */
+  let userTurns = 0;
+  let toolUses = 0;
   let lastToolInput: Record<string, unknown> = {};
   let lastUserText = '';
   let lastTaskText = '';
@@ -353,6 +360,13 @@ export async function parseSessionRaw(file: string): Promise<RawSession | null> 
           lastUserText = txt.trim();
           if (isTaskLike(txt)) lastTaskText = txt.trim();
           lastEventKind = 'user';
+          // Counted here rather than on every 'user' event: this branch has
+          // already excluded tool results, interrupt notices and the PTY
+          // driver's own slash-command echoes, so it is the only place that
+          // means "a turn was actually put to the model" — which is exactly
+          // what distinguishes a one-shot tool invocation from a
+          // conversation (see machineIssued.ts).
+          userTurns += 1;
         }
         const low = txt.toLowerCase();
         if (low.includes('/define') || low.includes('criteria of done')) stageSignals.push('definition');
@@ -371,6 +385,7 @@ export async function parseSessionRaw(file: string): Promise<RawSession | null> 
         const tools = Array.isArray(m.content)
           ? m.content.filter((c: any) => c?.type === 'tool_use')
           : [];
+        toolUses += tools.length;
         if (tools.length) {
           const last = tools[tools.length - 1];
           lastToolName = String(last.name ?? '');
@@ -423,6 +438,8 @@ export async function parseSessionRaw(file: string): Promise<RawSession | null> 
     label,
     stage,
     everHadRemoteControl,
+    userTurns,
+    toolUses,
   };
 }
 
@@ -459,6 +476,8 @@ export function classifySession(raw: RawSession, now: number, hook?: HookState):
     label,
     stage,
     everHadRemoteControl,
+    userTurns,
+    toolUses,
   } = raw;
 
   const idleMs = lastTs > 0 ? now - lastTs : Number.MAX_SAFE_INTEGER;
@@ -602,6 +621,8 @@ export function classifySession(raw: RawSession, now: number, hook?: HookState):
     file,
     taskLine: computeTaskLine(taskItems),
     everHadRemoteControl,
+    userTurns,
+    toolUses,
   };
 }
 
