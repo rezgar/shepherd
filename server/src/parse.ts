@@ -58,6 +58,15 @@ function textOf(content: unknown): string {
   return '';
 }
 
+/** Whether a user message carries anything at all — text, an image, an
+ *  attachment. Distinct from `textOf(content).trim()`, which is empty for a
+ *  turn that is only a pasted screenshot. */
+function hasContent(content: unknown): boolean {
+  if (typeof content === 'string') return content.trim() !== '';
+  if (Array.isArray(content)) return content.length > 0;
+  return false;
+}
+
 /** A specific description of a single tool call, from its inputs. */
 function toolDetail(name: string, input: Record<string, unknown>): string {
   const n = name.toLowerCase();
@@ -245,6 +254,8 @@ export interface RawSession {
   label: string;
   stage: Stage;
   everHadRemoteControl: boolean;
+  userTurns: number;
+  toolUses: number;
 }
 
 /**
@@ -272,6 +283,11 @@ export async function parseSessionRaw(file: string): Promise<RawSession | null> 
   let lastAssistantText = '';
   let lastAssistantStop: string | null = null;
   let lastToolName = '';
+  /** Turns genuinely put to the model, and tool calls made in reply — the two
+   *  numbers machineIssued.ts needs to tell a one-shot tool invocation
+   *  (`aic.sh` asking for a commit message) from a session a person used. */
+  let userTurns = 0;
+  let toolUses = 0;
   let lastToolInput: Record<string, unknown> = {};
   let lastUserText = '';
   let lastTaskText = '';
@@ -354,6 +370,16 @@ export async function parseSessionRaw(file: string): Promise<RawSession | null> 
           if (isTaskLike(txt)) lastTaskText = txt.trim();
           lastEventKind = 'user';
         }
+        // Counted separately from the text branch above, and deliberately so:
+        // a turn whose content is only an image or an attachment yields no
+        // text at all (textOf keeps `type === 'text'` blocks and nothing
+        // else), so counting inside that branch missed it entirely — a
+        // screenshot-driven conversation read as a single-turn one-shot and
+        // was hidden. What matters here is that a turn was put to the model,
+        // not whether it happened to contain words. Tool results, interrupt
+        // notices and the PTY driver's own slash-command echoes are already
+        // excluded above, by `break`.
+        if (!hasToolResult && hasContent(content)) userTurns += 1;
         const low = txt.toLowerCase();
         if (low.includes('/define') || low.includes('criteria of done')) stageSignals.push('definition');
         if (low.includes('/plan')) stageSignals.push('planning');
@@ -371,6 +397,7 @@ export async function parseSessionRaw(file: string): Promise<RawSession | null> 
         const tools = Array.isArray(m.content)
           ? m.content.filter((c: any) => c?.type === 'tool_use')
           : [];
+        toolUses += tools.length;
         if (tools.length) {
           const last = tools[tools.length - 1];
           lastToolName = String(last.name ?? '');
@@ -423,6 +450,8 @@ export async function parseSessionRaw(file: string): Promise<RawSession | null> 
     label,
     stage,
     everHadRemoteControl,
+    userTurns,
+    toolUses,
   };
 }
 
@@ -459,6 +488,8 @@ export function classifySession(raw: RawSession, now: number, hook?: HookState):
     label,
     stage,
     everHadRemoteControl,
+    userTurns,
+    toolUses,
   } = raw;
 
   const idleMs = lastTs > 0 ? now - lastTs : Number.MAX_SAFE_INTEGER;
@@ -602,6 +633,8 @@ export function classifySession(raw: RawSession, now: number, hook?: HookState):
     file,
     taskLine: computeTaskLine(taskItems),
     everHadRemoteControl,
+    userTurns,
+    toolUses,
   };
 }
 
