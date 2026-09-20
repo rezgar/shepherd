@@ -38,6 +38,11 @@ const PROBE_MAX_WAIT_MS = 60_000;
  *  spawn timeout in this codebase is — a `claude` launch can take well
  *  over a minute under real concurrent load. */
 const PROBE_TOTAL_TIMEOUT_MS = 90_000;
+/** How long to wait for a killed probe to actually be reaped before giving up
+ *  on it. Generous next to the milliseconds a signalled process normally
+ *  takes, because the cost of waiting is one delayed refresh whereas the cost
+ *  of giving up too early is the leaked handle this wait exists to prevent. */
+const PROBE_EXIT_TIMEOUT_MS = 5_000;
 
 /** Renders whatever's currently on the probe's virtual screen as plain
  *  text, one line per row. Feeding the raw PTY bytes through a REAL
@@ -178,12 +183,62 @@ async function scrapeUsage(): Promise<Limits> {
   try {
     return await readUsagePanel(p);
   } finally {
+    await closeProbe(p);
+    cleanupProbeFiles();
+  }
+}
+
+/** Kill the probe and wait for its exit to actually be delivered.
+ *
+ *  `p.kill()` only sends the signal. node-pty releases the handle backing the
+ *  pty when it reaps the child and fires `onExit`, so returning before that
+ *  abandons the handle — and since this probe runs every five minutes, the
+ *  daemon accrues one leaked socket per refresh for as long as it lives.
+ *
+ *  That is exactly what index.ts's temporary `_getActiveHandles()` diagnostic
+ *  was left in to chase, and it caught it: across one ~4h48m run `Socket`
+ *  climbed 2 -> 59 monotonically, 1:1 with elapsed probes (57 probes, 57
+ *  sockets), while every other handle class stayed flat. Distinct from #92,
+ *  which was FSWatcher handles and explicitly not this.
+ *
+ *  The listener is registered BEFORE the kill, not after: a process that dies
+ *  the moment it is signalled would otherwise fire its exit into a handler
+ *  that does not exist yet, and this would then wait out the full timeout for
+ *  an event already gone by.
+ *
+ *  Unlike a live session's pty (sender.ts's gracefulClose, which types
+ *  `/exit` and escalates), the probe gets no graceful shutdown: nothing is
+ *  attached to it, its transcripts are deleted immediately after, and it has
+ *  already been driven through a `/usage` panel it was never meant to return
+ *  from. Killing outright stays correct — the bug was never the signal, only
+ *  the missing reap. */
+async function closeProbe(p: IPty): Promise<void> {
+  const reaped = new Promise<void>((resolve) => {
+    p.onExit(() => {
+      resolve();
+    });
     try {
       p.kill();
     } catch {
-      /* already dead */
+      resolve(); // already dead — no exit event is coming
     }
-    cleanupProbeFiles();
+  });
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // Bounded so a probe that somehow refuses to die cannot wedge the
+    // five-minute refresh loop. A missed reap is the leak this exists to fix,
+    // but blocking forever on one would be strictly worse.
+    await Promise.race([
+      reaped,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, PROBE_EXIT_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    // Otherwise the loser of that race keeps a live timer for its full
+    // duration — a smaller leak, but the same kind, in the same function.
+    if (timer) clearTimeout(timer);
   }
 }
 
